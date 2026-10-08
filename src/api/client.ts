@@ -12,7 +12,8 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}, tok
   try {
     const headers = new Headers(options.headers);
     headers.set('Accept', 'application/json');
-    if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    // Let fetch create the multipart boundary for FormData uploads.
+    if (typeof options.body === 'string' && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     if (token) headers.set('Authorization', `Bearer ${token}`);
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
