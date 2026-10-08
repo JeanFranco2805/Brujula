@@ -1,10 +1,14 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import {Ionicons} from '@expo/vector-icons';
@@ -12,6 +16,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import {RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder, useAudioRecorderState} from 'expo-audio';
 import * as Speech from 'expo-speech';
 import {apiRequest} from '../api/client';
+import {useAuth} from '../auth/AuthContext';
 import {cancelStudyReminder, exportSessionsToDeviceCalendar, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
 import {AppPage, Brand, Pill, PrimaryButton, SectionHeading, SurfaceCard} from '../components/ui';
 import {colors, radius} from '../theme';
@@ -137,7 +142,11 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
 }
 
 function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {accessToken: string | null; materials: Material[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; onOpenLesson: () => void}) {
+  const {linkLocalAccount} = useAuth();
   const [uploading, setUploading] = useState(false);
+  const [showAccountLink, setShowAccountLink] = useState(false);
+  const [linkPassword, setLinkPassword] = useState('');
+  const [linkingAccount, setLinkingAccount] = useState(false);
   useEffect(() => {
     let active = true;
     if (!accessToken || accessToken.startsWith('local:')) return;
@@ -147,25 +156,50 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
     return () => { active = false; };
   }, [accessToken, setMaterials]);
 
-  const importPdf = async () => {
+  const importPdf = async (tokenOverride?: string) => {
+    const token = tokenOverride ?? accessToken;
+    if (token?.startsWith('local:')) {
+      setShowAccountLink(true);
+      return;
+    }
+    if (!token) {
+      Alert.alert('Inicia sesión para importar', 'Vuelve a iniciar sesión para conectar tus materiales con Brújula.');
+      return;
+    }
+
     try {
       const result = await DocumentPicker.getDocumentAsync({type: 'application/pdf', copyToCacheDirectory: true});
       if (result.canceled || !result.assets[0]) return;
-      if (!accessToken || accessToken.startsWith('local:')) {
-        Alert.alert('Conecta Brújula API', 'La cuenta local funciona en este dispositivo, pero para procesar y guardar PDFs necesitas iniciar sesión con el backend configurado.');
-        return;
-      }
       const picked = result.assets[0];
       setUploading(true);
       const body = new FormData();
       body.append('file', {uri: picked.uri, name: picked.name, type: picked.mimeType ?? 'application/pdf'} as unknown as Blob);
-      const saved = await apiRequest<MaterialRecord>('/materials', {method: 'POST', body}, accessToken);
+      const saved = await apiRequest<MaterialRecord>('/materials', {method: 'POST', body}, token);
       setMaterials(previous => [toMaterial(saved), ...previous.filter(item => item.id !== saved.id)]);
       Alert.alert('PDF procesado', `${saved.summary}\n\n${saved.topics.length} temas organizados · ${saved.analysisProvider === 'openai' ? 'análisis con IA' : 'análisis local'}`);
-    } catch {
-      Alert.alert('No se pudo procesar el PDF', 'Verifica que sea un PDF con texto seleccionable y conexión a Brújula API. Inténtalo de nuevo.');
+    } catch (error) {
+      Alert.alert('No se pudo procesar el PDF', error instanceof Error ? error.message : 'Ocurrió un error inesperado al importar el archivo.');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const linkAccountAndImport = async () => {
+    if (linkingAccount) return;
+    if (!linkPassword) {
+      Alert.alert('Escribe tu contraseña', 'La necesitamos para proteger y conectar tu cuenta con el servidor.');
+      return;
+    }
+    setLinkingAccount(true);
+    try {
+      const session = await linkLocalAccount(linkPassword);
+      setShowAccountLink(false);
+      setLinkPassword('');
+      await importPdf(session.accessToken);
+    } catch (error) {
+      Alert.alert('No se pudo conectar la cuenta', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
+    } finally {
+      setLinkingAccount(false);
     }
   };
 
@@ -199,6 +233,35 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
       </View>
       <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Brújula extrae el texto del PDF, crea un resumen y organiza los temas para repasar. Los archivos escaneados requieren OCR y aún no se procesan.</Text></View>
       <VoiceNotesPanel accessToken={accessToken} />
+      <Modal transparent visible={showAccountLink} animationType="fade" onRequestClose={() => { setShowAccountLink(false); setLinkPassword(''); }}>
+        <View style={styles.modalBackdrop}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalKeyboard}>
+            <SurfaceCard style={styles.linkDialog}>
+              <View style={styles.linkDialogIcon}><Ionicons name="cloud-upload-outline" size={22} color={colors.primary} /></View>
+              <Text style={styles.linkDialogTitle}>Conecta tu cuenta</Text>
+              <Text style={styles.linkDialogCopy}>Esta cuenta se creó en este dispositivo cuando el servidor no estaba disponible. Conéctala para guardar tus PDFs y materiales de forma segura.</Text>
+              <Text style={styles.linkPasswordLabel}>Contraseña de tu cuenta</Text>
+              <TextInput
+                accessibilityLabel="Contraseña de tu cuenta"
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={setLinkPassword}
+                onSubmitEditing={() => { void linkAccountAndImport(); }}
+                placeholder="Contraseña"
+                placeholderTextColor="#98A2B3"
+                returnKeyType="go"
+                secureTextEntry
+                style={styles.linkPasswordInput}
+                value={linkPassword}
+              />
+              <PrimaryButton title={linkingAccount ? 'Conectando…' : 'Conectar e importar PDF'} icon={linkingAccount ? 'hourglass-outline' : 'cloud-upload-outline'} onPress={() => { void linkAccountAndImport(); }} disabled={linkingAccount} showArrow={false} />
+              <Pressable style={styles.linkCancel} onPress={() => { setShowAccountLink(false); setLinkPassword(''); }} disabled={linkingAccount}>
+                <Text style={styles.linkCancelText}>Ahora no</Text>
+              </Pressable>
+            </SurfaceCard>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
     </>
   );
 }
@@ -595,6 +658,16 @@ const styles = StyleSheet.create({
   progressFillSmall: {height: 5, borderRadius: 3, backgroundColor: colors.teal},
   infoBox: {flexDirection: 'row', alignItems: 'flex-start', gap: 9, backgroundColor: '#F0F1FF', padding: 13, borderRadius: radius.sm, marginTop: 17},
   infoBoxText: {flex: 1, fontSize: 12, lineHeight: 18, color: colors.muted},
+  modalBackdrop: {flex: 1, justifyContent: 'center', padding: 22, backgroundColor: 'rgba(17, 24, 39, 0.48)'},
+  modalKeyboard: {width: '100%', alignItems: 'center'},
+  linkDialog: {width: '100%', maxWidth: 420, padding: 22},
+  linkDialogIcon: {width: 46, height: 46, borderRadius: 15, backgroundColor: '#F0F1FF', alignItems: 'center', justifyContent: 'center', marginBottom: 13},
+  linkDialogTitle: {fontSize: 20, color: colors.text, fontWeight: '800'},
+  linkDialogCopy: {fontSize: 13, lineHeight: 19, color: colors.muted, marginTop: 7, marginBottom: 18},
+  linkPasswordLabel: {fontSize: 13, color: colors.text, fontWeight: '700', marginBottom: 7},
+  linkPasswordInput: {minHeight: 52, borderWidth: 1, borderColor: '#CBD2E0', borderRadius: 12, paddingHorizontal: 13, color: colors.text, fontSize: 15, marginBottom: 14},
+  linkCancel: {minHeight: 43, alignItems: 'center', justifyContent: 'center'},
+  linkCancelText: {fontSize: 14, color: colors.muted, fontWeight: '600'},
   calendarCard: {paddingHorizontal: 7, paddingVertical: 15, marginBottom: 23},
   weekDays: {flexDirection: 'row', justifyContent: 'space-around'},
   dayCell: {alignItems: 'center', gap: 9},
