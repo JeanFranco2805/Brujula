@@ -4,16 +4,20 @@ import {useAuth} from '../auth/AuthContext';
 import {MainApp, type TabKey} from './MainApp';
 
 export function AuthenticatedTab({tab}: {tab: TabKey}) {
-  const {user, signOut} = useAuth();
+  const {user, token, signOut} = useAuth();
   if (!user) return null;
 
   return (
     <MainApp
       account={user}
+      accessToken={token}
       activeTab={tab}
       onEditPreferences={() => router.push('/onboarding')}
       onSignOut={() => { void signOut().then(() => router.replace('/(auth)/login')); }}
-      onOpenLesson={() => router.push('/lesson')}
+      onOpenLesson={(materialId, topicIndex) => router.push(materialId
+        ? {pathname: '/lesson', params: {materialId, topicIndex: String(topicIndex ?? 0)}}
+        : '/lesson')}
+      onOpenMaterials={() => router.push('/(tabs)/materials')}
     />
   );
 }
