@@ -1,6 +1,6 @@
 # Brújula
 
-Aplicación móvil en Expo/React Native y API REST en NestJS. La primera etapa del backend cubre registro, inicio de sesión, recuperación de sesión y guardado de preferencias de estudio en PostgreSQL.
+Aplicación móvil en Expo/React Native y API REST en NestJS con PostgreSQL. Incluye cuentas, preferencias, importación y organización de PDFs, planes de estudio, apuntes de voz, notificaciones locales y exportación de sesiones al calendario del dispositivo.
 
 ## Requisitos
 
@@ -66,10 +66,30 @@ Abre el proyecto con Expo Go o con un emulador. Si usas teléfono físico, el co
 | `POST` | `/auth/google` | Valida un ID token de Google y crea o inicia una sesión |
 | `GET` | `/profile` | Devuelve el perfil del usuario autenticado |
 | `PATCH` | `/profile/preferences` | Guarda formato, ritmo, minutos y objetivo de estudio |
+| `POST` | `/materials` | Importa un PDF multipart (`file`), extrae texto y prepara resumen, ideas clave y temas |
+| `GET` | `/materials` | Lista los materiales del usuario |
+| `GET` | `/materials/:id` | Obtiene el resumen, ideas y temas de un material propio |
+| `DELETE` | `/materials/:id` | Elimina un material propio y sus sesiones vinculadas |
+| `GET` | `/study-plan` | Lista sesiones de estudio |
+| `POST` | `/study-plan/generate` | Genera sesiones basadas en temas y preferencias del usuario |
+| `PATCH` | `/study-plan/:id/complete` | Marca una sesión como completada |
+| `PATCH` | `/study-plan/:id/schedule` | Cambia fecha y hora de una sesión pendiente |
+| `POST` | `/voice-notes` | Transcribe una grabación multipart (`file`) y guarda transcripción y resumen |
+| `GET` | `/voice-notes` | Lista apuntes de voz del usuario |
+| `GET` | `/voice-notes/:id` | Obtiene una nota propia |
+| `DELETE` | `/voice-notes/:id` | Elimina una nota propia |
 
 Las rutas privadas reciben `Authorization: Bearer <token>`. El servidor guarda contraseñas como hashes bcrypt y la aplicación conserva el token usando almacenamiento seguro nativo. En web se usa almacenamiento local del navegador.
 
 Si la API no responde, el registro y el login por correo usan el modo local del dispositivo. Esas cuentas y sus preferencias no se sincronizan con otros dispositivos. Al iniciar la API, las cuentas creadas localmente siguen disponibles en este dispositivo.
+
+### IA y apuntes de voz
+
+`backend/.env` puede configurar `OPENAI_API_KEY`, `OPENAI_STUDY_MODEL` y `OPENAI_TRANSCRIPTION_MODEL`. Sin clave, los PDFs se organizan con extracción local de texto; la transcripción de voz requiere la clave. Los PDFs escaneados que no contienen texto seleccionable todavía necesitan OCR. Se aceptan archivos de hasta 12 MB para PDF y 25 MB para audio.
+
+### Plan y recordatorios
+
+El plan se genera desde los temas de los PDFs y usa las preferencias del perfil. La app puede pedir permiso para programar notificaciones locales y agregar o actualizar las sesiones en el calendario editable del dispositivo. No se sincroniza con Google Calendar mediante OAuth; para eso hacen falta credenciales y un flujo OAuth de calendario independiente.
 
 ### Continuar con Google
 
@@ -83,6 +103,8 @@ La pantalla incluye el flujo OAuth de Google. Para activarlo, configura los Clie
 - `backend/migrations/`: cambios SQL versionados.
 - `docker-compose.yml`: PostgreSQL local con volumen persistente.
 
-## Alcance de esta etapa
+## Pruebas
 
-La autenticación y las preferencias ya usan el backend. El procesamiento de PDFs con IA, generación de planes desde documentos, sincronización con calendarios y notificaciones quedan para la siguiente etapa. También faltan recuperación/verificación de correo y renovación de tokens.
+Desde `backend/`, ejecuta `npm test` para las pruebas de servicios y rutas HTTP con dobles de base de datos/proveedores, `npm run test:coverage` para cobertura y `npm run build` para compilar. Para una prueba con PostgreSQL real, levanta Docker, aplica `npm run db:migrate` y usa la app con `EXPO_PUBLIC_API_URL` apuntando al servidor.
+
+La integración real requiere configurar PostgreSQL, la clave OpenAI para transcripción, y los Client IDs de Google para OAuth de inicio de sesión. Recuperación/verificación de correo, renovación de tokens, OCR de PDFs escaneados y OAuth de Google Calendar no están implementados todavía.
