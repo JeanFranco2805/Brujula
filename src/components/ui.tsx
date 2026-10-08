@@ -14,8 +14,8 @@ import {colors, radius, spacing} from '../theme';
 
 type IconName = keyof typeof Ionicons.glyphMap;
 
-export function AppPage({children, edges}: React.PropsWithChildren<{edges?: Edge[]}>) {
-  return <SafeAreaView edges={edges} style={styles.safeArea}>{children}</SafeAreaView>;
+export function AppPage({children, edges, backgroundColor}: React.PropsWithChildren<{edges?: Edge[]; backgroundColor?: string}>) {
+  return <SafeAreaView edges={edges} style={[styles.safeArea, backgroundColor ? {backgroundColor} : null]}>{children}</SafeAreaView>;
 }
 
 export function Brand({compact = false}: {compact?: boolean}) {
@@ -36,6 +36,7 @@ export function PrimaryButton({
   disabled = false,
   loading = false,
   variant = 'primary',
+  showArrow = true,
 }: {
   title: string;
   onPress: () => void;
@@ -43,6 +44,7 @@ export function PrimaryButton({
   disabled?: boolean;
   loading?: boolean;
   variant?: 'primary' | 'secondary';
+  showArrow?: boolean;
 }) {
   const secondary = variant === 'secondary';
   return (
@@ -62,7 +64,7 @@ export function PrimaryButton({
         <>
           {icon ? <Ionicons name={icon} size={19} color={secondary ? colors.primary : colors.surface} /> : null}
           <Text style={[styles.buttonText, secondary && styles.buttonTextSecondary]}>{title}</Text>
-          {!icon && !secondary ? <Ionicons name="arrow-forward" size={18} color={colors.surface} /> : null}
+          {!icon && !secondary && showArrow ? <Ionicons name="arrow-forward" size={18} color={colors.surface} /> : null}
         </>
       )}
     </Pressable>
@@ -143,8 +145,8 @@ const styles = StyleSheet.create({
   pressed: {opacity: 0.85, transform: [{scale: 0.99}]},
   fieldWrap: {gap: 8, marginBottom: 16},
   fieldLabel: {fontSize: 14, color: colors.text, fontWeight: '600'},
-  inputShell: {minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 13, paddingHorizontal: 14, backgroundColor: colors.surface},
-  input: {flex: 1, minHeight: 52, color: colors.text, fontSize: 15},
+  inputShell: {minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: '#CBD2E0', borderRadius: 12, paddingHorizontal: 14, backgroundColor: colors.surface},
+  input: {flex: 1, minHeight: 54, color: colors.text, fontSize: 15},
   card: {backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: radius.md, padding: spacing.md},
   sectionHeading: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12},
   sectionTitle: {fontSize: 18, color: colors.text, fontWeight: '700'},
