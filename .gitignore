@@ -39,6 +39,7 @@ yarn-error.*
 
 # typescript
 *.tsbuildinfo
+/backend/coverage/
 
 # generated native folders
 /ios
