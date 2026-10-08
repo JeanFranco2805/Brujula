@@ -15,7 +15,28 @@
           "configureAndroidBackup": true
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Brújula usa el micrófono para grabar tus apuntes de estudio."
+        }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Brújula agrega tus sesiones de estudio al calendario que elijas.",
+          "writeOnlyCalendarPermission": "Brújula agrega tus sesiones de estudio al calendario.",
+          "writeOnlyAccess": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#5145E5",
+          "defaultChannel": "study-reminders"
+        }
+      ]
     ],
     "ios": {
       "supportsTablet": true
