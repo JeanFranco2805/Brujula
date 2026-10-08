@@ -1,15 +1,28 @@
 {
   "expo": {
-    "name": "brujula-study-app",
-    "slug": "brujula-study-app",
+    "name": "Brújula",
+    "slug": "brujula-estudio",
+    "scheme": "brujula",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-router",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
+      ],
+      "expo-web-browser"
+    ],
     "ios": {
       "supportsTablet": true
     },
     "android": {
+      "package": "com.brujula.estudio",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
