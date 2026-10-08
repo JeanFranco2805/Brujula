@@ -36,7 +36,8 @@
           "color": "#5145E5",
           "defaultChannel": "study-reminders"
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "ios": {
       "supportsTablet": true
