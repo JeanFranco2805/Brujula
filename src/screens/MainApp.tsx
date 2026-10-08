@@ -25,6 +25,7 @@ import type {LearningFormat, UserProfile} from '../types';
 export type TabKey = 'home' | 'materials' | 'plan' | 'progress';
 type MaterialRecord = {id: string; originalName: string; fileSize: number; summary: string; keyPoints: string[]; topics: {title: string; explanation: string; questions: string[]}[]; analysisProvider: 'openai' | 'local'};
 type Material = {id?: string; name: string; topics: number; progress: number; summary?: string; isLocal?: boolean};
+type PickedPdf = {uri: string; name: string; mimeType?: string | null};
 type VoiceNoteRecord = {id: string; title: string; transcript: string; summary: string; keyPoints: string[]; createdAt: string};
 type StudySessionRecord = DeviceStudySession & {materialId: string; topicIndex: number; learningFormat: LearningFormat};
 
@@ -147,6 +148,7 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
   const [showAccountLink, setShowAccountLink] = useState(false);
   const [linkPassword, setLinkPassword] = useState('');
   const [linkingAccount, setLinkingAccount] = useState(false);
+  const [pendingPdf, setPendingPdf] = useState<PickedPdf | null>(null);
   useEffect(() => {
     let active = true;
     if (!accessToken || accessToken.startsWith('local:')) return;
@@ -156,13 +158,8 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
     return () => { active = false; };
   }, [accessToken, setMaterials]);
 
-  const importPdf = async (tokenOverride?: string) => {
-    const token = tokenOverride ?? accessToken;
-    if (token?.startsWith('local:')) {
-      setShowAccountLink(true);
-      return;
-    }
-    if (!token) {
+  const importPdf = async () => {
+    if (!accessToken) {
       Alert.alert('Inicia sesión para importar', 'Vuelve a iniciar sesión para conectar tus materiales con Brújula.');
       return;
     }
@@ -171,14 +168,28 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
       const result = await DocumentPicker.getDocumentAsync({type: 'application/pdf', copyToCacheDirectory: true});
       if (result.canceled || !result.assets[0]) return;
       const picked = result.assets[0];
-      setUploading(true);
+      if (accessToken.startsWith('local:')) {
+        setPendingPdf(picked);
+        setLinkPassword('');
+        setShowAccountLink(true);
+        return;
+      }
+      await uploadPdf(picked, accessToken);
+    } catch (error) {
+      Alert.alert('No se pudo abrir el PDF', error instanceof Error ? error.message : 'Ocurrió un error inesperado al seleccionar el archivo.');
+    }
+  };
+
+  const uploadPdf = async (picked: PickedPdf, token: string) => {
+    setUploading(true);
+    try {
       const body = new FormData();
       body.append('file', {uri: picked.uri, name: picked.name, type: picked.mimeType ?? 'application/pdf'} as unknown as Blob);
       const saved = await apiRequest<MaterialRecord>('/materials', {method: 'POST', body}, token);
       setMaterials(previous => [toMaterial(saved), ...previous.filter(item => item.id !== saved.id)]);
       Alert.alert('PDF procesado', `${saved.summary}\n\n${saved.topics.length} temas organizados · ${saved.analysisProvider === 'openai' ? 'análisis con IA' : 'análisis local'}`);
     } catch (error) {
-      Alert.alert('No se pudo procesar el PDF', error instanceof Error ? error.message : 'Ocurrió un error inesperado al importar el archivo.');
+      Alert.alert('No se pudo procesar el PDF', error instanceof Error ? error.message : 'Ocurrió un error inesperado al subir el archivo.');
     } finally {
       setUploading(false);
     }
@@ -192,10 +203,13 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
     }
     setLinkingAccount(true);
     try {
+      if (!pendingPdf) throw new Error('Selecciona primero un PDF de los archivos del teléfono.');
+      const picked = pendingPdf;
       const session = await linkLocalAccount(linkPassword);
       setShowAccountLink(false);
       setLinkPassword('');
-      await importPdf(session.accessToken);
+      setPendingPdf(null);
+      await uploadPdf(picked, session.accessToken);
     } catch (error) {
       Alert.alert('No se pudo conectar la cuenta', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
     } finally {
@@ -239,7 +253,8 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
             <SurfaceCard style={styles.linkDialog}>
               <View style={styles.linkDialogIcon}><Ionicons name="cloud-upload-outline" size={22} color={colors.primary} /></View>
               <Text style={styles.linkDialogTitle}>Conecta tu cuenta</Text>
-              <Text style={styles.linkDialogCopy}>Esta cuenta se creó en este dispositivo cuando el servidor no estaba disponible. Conéctala para guardar tus PDFs y materiales de forma segura.</Text>
+              <Text style={styles.linkDialogCopy}>Esta cuenta se creó en este dispositivo cuando el servidor no estaba disponible. Conéctala para subir el archivo local que seleccionaste:</Text>
+              <View style={styles.selectedPdfRow}><Ionicons name="document-text-outline" size={19} color={colors.primary} /><Text numberOfLines={1} style={styles.selectedPdfName}>{pendingPdf?.name ?? 'PDF seleccionado'}</Text></View>
               <Text style={styles.linkPasswordLabel}>Contraseña de tu cuenta</Text>
               <TextInput
                 accessibilityLabel="Contraseña de tu cuenta"
@@ -664,6 +679,8 @@ const styles = StyleSheet.create({
   linkDialogIcon: {width: 46, height: 46, borderRadius: 15, backgroundColor: '#F0F1FF', alignItems: 'center', justifyContent: 'center', marginBottom: 13},
   linkDialogTitle: {fontSize: 20, color: colors.text, fontWeight: '800'},
   linkDialogCopy: {fontSize: 13, lineHeight: 19, color: colors.muted, marginTop: 7, marginBottom: 18},
+  selectedPdfRow: {flexDirection: 'row', alignItems: 'center', gap: 9, padding: 11, borderRadius: 11, backgroundColor: '#F0F1FF', marginBottom: 16},
+  selectedPdfName: {flex: 1, fontSize: 13, color: colors.text, fontWeight: '700'},
   linkPasswordLabel: {fontSize: 13, color: colors.text, fontWeight: '700', marginBottom: 7},
   linkPasswordInput: {minHeight: 52, borderWidth: 1, borderColor: '#CBD2E0', borderRadius: 12, paddingHorizontal: 13, color: colors.text, fontSize: 15, marginBottom: 14},
   linkCancel: {minHeight: 43, alignItems: 'center', justifyContent: 'center'},
