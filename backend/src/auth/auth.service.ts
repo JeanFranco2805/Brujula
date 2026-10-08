@@ -1,4 +1,4 @@
-import {ConflictException, Injectable, ServiceUnavailableException, UnauthorizedException} from '@nestjs/common';
+import {BadRequestException, ConflictException, Injectable, ServiceUnavailableException, UnauthorizedException} from '@nestjs/common';
 import {ConfigService} from '@nestjs/config';
 import {JwtService} from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
@@ -20,6 +20,10 @@ export class AuthService {
   async register(input: RegisterDto) {
     const name = input.name.trim();
     const email = input.email.trim().normalize('NFC').toLowerCase();
+    if (!name) throw new BadRequestException('El nombre es obligatorio.');
+    if (Buffer.byteLength(input.password, 'utf8') > 72) {
+      throw new BadRequestException('La contraseña no puede superar los 72 bytes UTF-8.');
+    }
     const passwordHash = await bcrypt.hash(input.password, 12);
 
     try {
