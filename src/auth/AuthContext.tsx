@@ -15,6 +15,7 @@ type AuthContextValue = {
   loading: boolean;
   signUp: (input: {name: string; email: string; password: string}) => Promise<UserProfile>;
   signIn: (input: {email: string; password: string}) => Promise<UserProfile>;
+  linkLocalAccount: (password: string) => Promise<{user: UserProfile; accessToken: string}>;
   signInWithGoogle: (idToken: string) => Promise<UserProfile>;
   savePreferences: (preferences: StudyPreferences) => Promise<UserProfile>;
   signOut: () => Promise<void>;
@@ -209,6 +210,48 @@ export function AuthProvider({children}: React.PropsWithChildren) {
     }
   }, [acceptLocalSession, acceptSession, signInLocally]);
 
+  const linkLocalAccount = useCallback(async (password: string) => {
+    if (!token?.startsWith('local:') || !user) throw new ApiError('Esta cuenta ya está conectada al servidor.', 400);
+
+    const localAccount = Object.values(await readLocalAccounts()).find(account => account.user.id === user.id);
+    if (!localAccount) throw new ApiError('No encontramos los datos locales de esta cuenta. Vuelve a iniciar sesión.', 404);
+    if (!await bcrypt.compare(password, localAccount.passwordHash)) {
+      throw new ApiError('La contraseña no coincide con esta cuenta local.', 401);
+    }
+
+    let session: SessionResponse;
+    try {
+      session = await apiRequest<SessionResponse>('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({email: localAccount.user.email, password}),
+      });
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+      try {
+        session = await apiRequest<SessionResponse>('/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({name: localAccount.user.name, email: localAccount.user.email, password}),
+        });
+      } catch (registerError) {
+        if (registerError instanceof ApiError && registerError.status === 409) {
+          throw new ApiError('Ya existe una cuenta en el servidor con este correo. Cierra sesión e inicia con la contraseña de esa cuenta.', 409);
+        }
+        throw registerError;
+      }
+    }
+
+    if (localAccount.user.onboardingCompleted) {
+      const profile = await apiRequest<UserProfile>('/profile/preferences', {
+        method: 'PATCH',
+        body: JSON.stringify(localAccount.user.preferences),
+      }, session.accessToken);
+      session = {...session, user: profile};
+    }
+
+    await acceptSession(session);
+    return {user: session.user, accessToken: session.accessToken};
+  }, [acceptSession, token, user]);
+
   const signInWithGoogle = useCallback(async (idToken: string) => {
     const session = await apiRequest<SessionResponse>('/auth/google', {
       method: 'POST',
@@ -253,7 +296,7 @@ export function AuthProvider({children}: React.PropsWithChildren) {
     setUser(null);
   }, []);
 
-  const value = useMemo(() => ({user, token, loading, signUp, signIn, signInWithGoogle, savePreferences, signOut}), [user, token, loading, signUp, signIn, signInWithGoogle, savePreferences, signOut]);
+  const value = useMemo(() => ({user, token, loading, signUp, signIn, linkLocalAccount, signInWithGoogle, savePreferences, signOut}), [user, token, loading, signUp, signIn, linkLocalAccount, signInWithGoogle, savePreferences, signOut]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
