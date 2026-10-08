@@ -1,14 +1,10 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   Alert,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import {Ionicons} from '@expo/vector-icons';
@@ -16,16 +12,15 @@ import * as DocumentPicker from 'expo-document-picker';
 import {RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder, useAudioRecorderState} from 'expo-audio';
 import * as Speech from 'expo-speech';
 import {apiRequest} from '../api/client';
-import {useAuth} from '../auth/AuthContext';
 import {cancelStudyReminder, exportSessionsToDeviceCalendar, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
+import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, openLocalPdf, type LocalPdf} from '../services/local-pdfs';
 import {AppPage, Brand, Pill, PrimaryButton, SectionHeading, SurfaceCard} from '../components/ui';
 import {colors, radius} from '../theme';
 import type {LearningFormat, UserProfile} from '../types';
 
 export type TabKey = 'home' | 'materials' | 'plan' | 'progress';
 type MaterialRecord = {id: string; originalName: string; fileSize: number; summary: string; keyPoints: string[]; topics: {title: string; explanation: string; questions: string[]}[]; analysisProvider: 'openai' | 'local'};
-type Material = {id?: string; name: string; topics: number; progress: number; summary?: string; isLocal?: boolean};
-type PickedPdf = {uri: string; name: string; mimeType?: string | null};
+type Material = {id?: string; name: string; topics: number; progress: number; summary?: string; isLocal?: boolean; localFile?: LocalPdf};
 type VoiceNoteRecord = {id: string; title: string; transcript: string; summary: string; keyPoints: string[]; createdAt: string};
 type StudySessionRecord = DeviceStudySession & {materialId: string; topicIndex: number; learningFormat: LearningFormat};
 
@@ -59,9 +54,17 @@ export function MainApp({
 
   useEffect(() => {
     let active = true;
+    loadLocalPdfs(account.id)
+      .then(files => { if (active) setMaterials(previous => [...previous.filter(material => !material.isLocal), ...files.map(toLocalMaterial)]); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [account.id]);
+
+  useEffect(() => {
+    let active = true;
     if (!accessToken || accessToken.startsWith('local:')) return;
     apiRequest<MaterialRecord[]>('/materials', {}, accessToken)
-      .then(records => { if (active) setMaterials(records.map(toMaterial)); })
+      .then(records => { if (active) setMaterials(previous => [...previous.filter(material => material.isLocal), ...records.map(toMaterial)]); })
       .catch(() => undefined);
     apiRequest<StudySessionRecord[]>('/study-plan', {}, accessToken)
       .then(records => { if (active) setSessions(records); })
@@ -85,7 +88,7 @@ export function MainApp({
 
       <ScrollView contentContainerStyle={styles.mainContent} showsVerticalScrollIndicator={false}>
         {activeTab === 'home' ? <HomeTab firstName={firstName} account={account} materials={materials} sessions={sessions} onContinue={onOpenLesson} onOpenMaterials={onOpenMaterials} onEditPreferences={onEditPreferences} /> : null}
-        {activeTab === 'materials' ? <MaterialsTab accessToken={accessToken} materials={materials} setMaterials={setMaterials} onOpenLesson={onOpenLesson} /> : null}
+        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} accessToken={accessToken} materials={materials} setMaterials={setMaterials} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'plan' ? <PlanTab accessToken={accessToken} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'progress' ? <ProgressTab account={account} materials={materials} sessions={sessions} onEditPreferences={onEditPreferences} /> : null}
         <Pressable style={styles.signOut} onPress={() => Alert.alert('Cerrar sesión', '¿Quieres volver a la pantalla de acceso?', [{text: 'Cancelar', style: 'cancel'}, {text: 'Cerrar sesión', style: 'destructive', onPress: onSignOut}])}>
@@ -113,7 +116,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
         </View>
         <View style={styles.todayBody}>
           <View style={styles.subjectIcon}><Ionicons name="leaf-outline" size={27} color={colors.teal} /></View>
-          <View style={styles.todayCopy}><Text style={styles.todayTitle}>{nextSession?.title ?? nextMaterial?.name ?? 'Todavía no hay un plan'}</Text><Text style={styles.todayDetail}>{nextSession ? `${nextSession.date} · ${formatLabels[nextSession.learningFormat]}` : 'Importa un PDF para crear tu primera sesión.'}</Text></View>
+          <View style={styles.todayCopy}><Text style={styles.todayTitle}>{nextSession?.title ?? nextMaterial?.name ?? 'Todavía no hay un plan'}</Text><Text style={styles.todayDetail}>{nextSession ? `${nextSession.date} · ${formatLabels[nextSession.learningFormat]}` : nextMaterial?.isLocal ? 'PDF guardado en este dispositivo.' : 'Importa un PDF para tenerlo a mano.'}</Text></View>
         </View>
         <PrimaryButton title={nextSession ? 'Continuar estudiando' : 'Importar material'} icon={nextSession ? 'play' : 'add'} onPress={nextSession ? () => onContinue(nextSession.materialId, nextSession.topicIndex) : onOpenMaterials} />
       </View>
@@ -127,7 +130,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
       <SectionHeading title="Material reciente" action="Ver todo" onAction={onOpenMaterials} />
       <Pressable style={styles.materialMini} onPress={onOpenMaterials}>
         <View style={styles.pdfIcon}><Ionicons name={materials[0] ? 'document-text' : 'add'} size={20} color={colors.primary} /></View>
-        <View style={styles.materialMiniCopy}><Text style={styles.materialName}>{materials[0]?.name ?? 'Agrega tu primer material'}</Text><Text style={styles.materialMeta}>{materials[0] ? `${materials[0].topics} temas organizados` : 'Importa un PDF para organizarlo'}</Text></View>
+        <View style={styles.materialMiniCopy}><Text style={styles.materialName}>{materials[0]?.name ?? 'Agrega tu primer material'}</Text><Text style={styles.materialMeta}>{materials[0]?.isLocal ? 'PDF guardado en este dispositivo' : materials[0] ? `${materials[0].topics} temas organizados` : 'Importa un PDF para guardarlo aquí'}</Text></View>
         <Ionicons name="chevron-forward" size={20} color={colors.muted} />
       </Pressable>
 
@@ -142,82 +145,36 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
   );
 }
 
-function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {accessToken: string | null; materials: Material[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; onOpenLesson: () => void}) {
-  const {linkLocalAccount} = useAuth();
+function MaterialsTab({ownerId, accessToken, materials, setMaterials, onOpenLesson}: {ownerId: string; accessToken: string | null; materials: Material[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; onOpenLesson: () => void}) {
   const [uploading, setUploading] = useState(false);
-  const [showAccountLink, setShowAccountLink] = useState(false);
-  const [linkPassword, setLinkPassword] = useState('');
-  const [linkingAccount, setLinkingAccount] = useState(false);
-  const [pendingPdf, setPendingPdf] = useState<PickedPdf | null>(null);
-  useEffect(() => {
-    let active = true;
-    if (!accessToken || accessToken.startsWith('local:')) return;
-    apiRequest<MaterialRecord[]>('/materials', {}, accessToken)
-      .then(records => { if (active) setMaterials(records.map(toMaterial)); })
-      .catch(error => { if (active) Alert.alert('No se pudieron cargar los materiales', error instanceof Error ? error.message : 'Inténtalo de nuevo.'); })
-    return () => { active = false; };
-  }, [accessToken, setMaterials]);
 
   const importPdf = async () => {
-    if (!accessToken) {
-      Alert.alert('Inicia sesión para importar', 'Vuelve a iniciar sesión para conectar tus materiales con Brújula.');
-      return;
-    }
-
+    setUploading(true);
     try {
       const result = await DocumentPicker.getDocumentAsync({type: 'application/pdf', copyToCacheDirectory: true});
       if (result.canceled || !result.assets[0]) return;
-      const picked = result.assets[0];
-      if (accessToken.startsWith('local:')) {
-        setPendingPdf(picked);
-        setLinkPassword('');
-        setShowAccountLink(true);
-        return;
-      }
-      await uploadPdf(picked, accessToken);
+      const saved = await importLocalPdf(ownerId, result.assets[0]);
+      setMaterials(previous => [toLocalMaterial(saved), ...previous.filter(item => item.id !== saved.id)]);
+      Alert.alert('PDF guardado', `${saved.name} quedó guardado en el dispositivo y estará disponible sin conexión.`);
     } catch (error) {
-      Alert.alert('No se pudo abrir el PDF', error instanceof Error ? error.message : 'Ocurrió un error inesperado al seleccionar el archivo.');
-    }
-  };
-
-  const uploadPdf = async (picked: PickedPdf, token: string) => {
-    setUploading(true);
-    try {
-      const body = new FormData();
-      body.append('file', {uri: picked.uri, name: picked.name, type: picked.mimeType ?? 'application/pdf'} as unknown as Blob);
-      const saved = await apiRequest<MaterialRecord>('/materials', {method: 'POST', body}, token);
-      setMaterials(previous => [toMaterial(saved), ...previous.filter(item => item.id !== saved.id)]);
-      Alert.alert('PDF procesado', `${saved.summary}\n\n${saved.topics.length} temas organizados · ${saved.analysisProvider === 'openai' ? 'análisis con IA' : 'análisis local'}`);
-    } catch (error) {
-      Alert.alert('No se pudo procesar el PDF', error instanceof Error ? error.message : 'Ocurrió un error inesperado al subir el archivo.');
+      Alert.alert('No se pudo importar el PDF', error instanceof Error ? error.message : 'Ocurrió un error inesperado al guardar el archivo en este dispositivo.');
     } finally {
       setUploading(false);
     }
   };
 
-  const linkAccountAndImport = async () => {
-    if (linkingAccount) return;
-    if (!linkPassword) {
-      Alert.alert('Escribe tu contraseña', 'La necesitamos para proteger y conectar tu cuenta con el servidor.');
+  const removeMaterial = (material: Material) => {
+    if (material.isLocal && material.localFile) {
+      Alert.alert('Eliminar PDF del dispositivo', `¿Quieres borrar “${material.name}” de Brújula y de este dispositivo?`, [
+        {text: 'Cancelar', style: 'cancel'},
+        {text: 'Eliminar', style: 'destructive', onPress: () => {
+          void deleteLocalPdf(ownerId, material.localFile!.id)
+            .then(() => setMaterials(previous => previous.filter(item => item.id !== material.id)))
+            .catch(error => Alert.alert('No se pudo eliminar el PDF', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
+        }},
+      ]);
       return;
     }
-    setLinkingAccount(true);
-    try {
-      if (!pendingPdf) throw new Error('Selecciona primero un PDF de los archivos del teléfono.');
-      const picked = pendingPdf;
-      const session = await linkLocalAccount(linkPassword);
-      setShowAccountLink(false);
-      setLinkPassword('');
-      setPendingPdf(null);
-      await uploadPdf(picked, session.accessToken);
-    } catch (error) {
-      Alert.alert('No se pudo conectar la cuenta', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
-    } finally {
-      setLinkingAccount(false);
-    }
-  };
-
-  const removeMaterial = (material: Material) => {
     if (!accessToken || !material.id) return;
     Alert.alert('Eliminar material', `¿Quieres eliminar “${material.name}” y sus sesiones asociadas?`, [
       {text: 'Cancelar', style: 'cancel'},
@@ -232,57 +189,40 @@ function MaterialsTab({accessToken, materials, setMaterials, onOpenLesson}: {acc
   return (
     <>
       <Text style={styles.pageTitle}>Materiales</Text>
-      <Text style={styles.subGreeting}>Tus apuntes y recursos en un solo lugar.</Text>
-      <PrimaryButton title={uploading ? 'Procesando PDF…' : 'Importar PDF'} icon={uploading ? 'hourglass-outline' : 'add'} onPress={() => { void importPdf(); }} disabled={uploading} />
+      <Text style={styles.subGreeting}>Elige un PDF de Archivos. Se guarda en este dispositivo y no se sube a un servidor.</Text>
+      <PrimaryButton title={uploading ? 'Guardando PDF…' : 'Importar PDF'} icon={uploading ? 'hourglass-outline' : 'add'} onPress={() => { void importPdf(); }} disabled={uploading} />
       <View style={styles.materialList}>
         {materials.map((material, index) => (
-          <Pressable key={material.id ?? `${material.name}-${index}`} style={styles.materialCard} onPress={() => material.summary ? Alert.alert(material.name, material.summary) : onOpenLesson()}>
+          <Pressable key={material.id ?? `${material.name}-${index}`} style={styles.materialCard} onPress={() => {
+            if (material.localFile) void openLocalPdf(material.localFile).catch(error => Alert.alert('No se pudo abrir el PDF', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
+            else if (material.summary) Alert.alert(material.name, material.summary);
+            else onOpenLesson();
+          }}>
             <View style={[styles.pdfIcon, index % 2 === 1 && styles.pdfIconAlt]}><Ionicons name="document-text" size={21} color={index % 2 === 1 ? colors.teal : colors.primary} /></View>
-            <View style={styles.materialInfo}><Text style={styles.materialName}>{material.name}</Text><Text style={styles.materialMeta}>{material.isLocal ? 'PDF importado · listo para procesar' : `${material.topics} temas organizados`}</Text>
+            <View style={styles.materialInfo}><Text numberOfLines={1} style={styles.materialName}>{material.name}</Text><Text style={styles.materialMeta}>{material.isLocal ? `En este dispositivo · ${formatFileSize(material.localFile?.size ?? 0)}` : `${material.topics} temas organizados`}</Text>
               {!material.isLocal ? <><Text style={styles.progressLabel}>{material.progress} de {material.topics} temas</Text><View style={styles.progressTrackSmall}><View style={[styles.progressFillSmall, {width: `${material.topics ? (material.progress / material.topics) * 100 : 0}%`}]} /></View></> : null}
             </View>
-            <View style={styles.materialActions}><Pressable onPress={event => { event.stopPropagation(); removeMaterial(material); }} hitSlop={10} accessibilityLabel={`Eliminar ${material.name}`}><Ionicons name="trash-outline" size={18} color={colors.muted} /></Pressable><Ionicons name="chevron-forward" size={19} color={colors.muted} /></View>
+            <View style={styles.materialActions}><Pressable onPress={event => { event.stopPropagation(); removeMaterial(material); }} hitSlop={10} accessibilityLabel={`Eliminar ${material.name}`}><Ionicons name="trash-outline" size={18} color={colors.muted} /></Pressable><Ionicons name={material.isLocal ? 'share-outline' : 'chevron-forward'} size={19} color={colors.muted} /></View>
           </Pressable>
         ))}
       </View>
-      <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Brújula extrae el texto del PDF, crea un resumen y organiza los temas para repasar. Los archivos escaneados requieren OCR y aún no se procesan.</Text></View>
+      <View style={styles.infoBox}><Ionicons name="phone-portrait-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Los PDFs se copian al almacenamiento privado de Brújula y siguen disponibles sin conexión. Toca uno para abrirlo con una aplicación de tu teléfono.</Text></View>
       <VoiceNotesPanel accessToken={accessToken} />
-      <Modal transparent visible={showAccountLink} animationType="fade" onRequestClose={() => { setShowAccountLink(false); setLinkPassword(''); }}>
-        <View style={styles.modalBackdrop}>
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalKeyboard}>
-            <SurfaceCard style={styles.linkDialog}>
-              <View style={styles.linkDialogIcon}><Ionicons name="cloud-upload-outline" size={22} color={colors.primary} /></View>
-              <Text style={styles.linkDialogTitle}>Conecta tu cuenta</Text>
-              <Text style={styles.linkDialogCopy}>Esta cuenta se creó en este dispositivo cuando el servidor no estaba disponible. Conéctala para subir el archivo local que seleccionaste:</Text>
-              <View style={styles.selectedPdfRow}><Ionicons name="document-text-outline" size={19} color={colors.primary} /><Text numberOfLines={1} style={styles.selectedPdfName}>{pendingPdf?.name ?? 'PDF seleccionado'}</Text></View>
-              <Text style={styles.linkPasswordLabel}>Contraseña de tu cuenta</Text>
-              <TextInput
-                accessibilityLabel="Contraseña de tu cuenta"
-                autoCapitalize="none"
-                autoCorrect={false}
-                onChangeText={setLinkPassword}
-                onSubmitEditing={() => { void linkAccountAndImport(); }}
-                placeholder="Contraseña"
-                placeholderTextColor="#98A2B3"
-                returnKeyType="go"
-                secureTextEntry
-                style={styles.linkPasswordInput}
-                value={linkPassword}
-              />
-              <PrimaryButton title={linkingAccount ? 'Conectando…' : 'Conectar e importar PDF'} icon={linkingAccount ? 'hourglass-outline' : 'cloud-upload-outline'} onPress={() => { void linkAccountAndImport(); }} disabled={linkingAccount} showArrow={false} />
-              <Pressable style={styles.linkCancel} onPress={() => { setShowAccountLink(false); setLinkPassword(''); }} disabled={linkingAccount}>
-                <Text style={styles.linkCancelText}>Ahora no</Text>
-              </Pressable>
-            </SurfaceCard>
-          </KeyboardAvoidingView>
-        </View>
-      </Modal>
     </>
   );
 }
 
 function toMaterial(record: MaterialRecord): Material {
   return {id: record.id, name: record.originalName, topics: record.topics?.length ?? 0, progress: 0, summary: record.summary};
+}
+
+function toLocalMaterial(file: LocalPdf): Material {
+  return {id: file.id, name: file.name, topics: 0, progress: 0, isLocal: true, localFile: file};
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function VoiceNotesPanel({accessToken}: {accessToken: string | null}) {
@@ -457,7 +397,7 @@ function PlanTab({accessToken, onOpenLesson}: {accessToken: string | null; onOpe
         const status = session.status === 'completed' ? 'done' : index === 0 ? 'next' : 'planned';
         return <SessionRow key={session.id} time={time} title={session.title} detail={`${dateLabel} · ${session.durationMinutes} min · ${formatLabels[session.learningFormat]}`} status={status} onPress={() => onOpenLesson(session.materialId, session.topicIndex)} onReschedule={session.status === 'planned' ? () => reschedule(session) : undefined} onComplete={session.status === 'planned' ? () => { void markComplete(session); } : undefined} />;
       })}
-      {!sessions.length ? <View style={styles.infoBox}><Ionicons name="cloud-offline-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Importa un PDF con texto para generar tu plan de estudio. Cuando tengas sesiones, podrás programar recordatorios y añadirlas al calendario del dispositivo.</Text></View> : null}
+      {!sessions.length ? <View style={styles.infoBox}><Ionicons name="cloud-offline-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Tus PDFs se guardan localmente desde Materiales. La extracción del contenido y la generación automática de sesiones aún no están disponibles. Cuando tengas sesiones, podrás programar recordatorios y añadirlas al calendario.</Text></View> : null}
     </>
   );
 }
@@ -475,12 +415,12 @@ function ProgressTab({account, materials, sessions, onEditPreferences}: {account
       </View>
       <SurfaceCard style={styles.progressSummary}>
         <Text style={styles.sectionTitle}>Temas en curso</Text>
-        {materials.map(material => {
+        {materials.filter(material => !material.isLocal).map(material => {
           const completed = sessions.filter(session => session.materialId === material.id && session.status === 'completed').length;
           const percent = material.topics ? Math.min(Math.round(completed / material.topics * 100), 100) : 0;
           return <ProgressTopic key={material.id ?? material.name} title={material.name} detail={`${completed} de ${material.topics} sesiones completadas`} percent={percent} />;
         })}
-        {!materials.length ? <Text style={styles.cardCaption}>Tus materiales y sesiones completadas aparecerán aquí.</Text> : null}
+        {!materials.some(material => !material.isLocal) ? <Text style={styles.cardCaption}>Los PDFs locales se guardan en Materiales. El progreso aparece cuando haya sesiones de estudio.</Text> : null}
       </SurfaceCard>
       <SurfaceCard style={styles.preferencesCard}>
         <Text style={styles.sectionTitle}>Preferencias de estudio</Text>
@@ -673,18 +613,6 @@ const styles = StyleSheet.create({
   progressFillSmall: {height: 5, borderRadius: 3, backgroundColor: colors.teal},
   infoBox: {flexDirection: 'row', alignItems: 'flex-start', gap: 9, backgroundColor: '#F0F1FF', padding: 13, borderRadius: radius.sm, marginTop: 17},
   infoBoxText: {flex: 1, fontSize: 12, lineHeight: 18, color: colors.muted},
-  modalBackdrop: {flex: 1, justifyContent: 'center', padding: 22, backgroundColor: 'rgba(17, 24, 39, 0.48)'},
-  modalKeyboard: {width: '100%', alignItems: 'center'},
-  linkDialog: {width: '100%', maxWidth: 420, padding: 22},
-  linkDialogIcon: {width: 46, height: 46, borderRadius: 15, backgroundColor: '#F0F1FF', alignItems: 'center', justifyContent: 'center', marginBottom: 13},
-  linkDialogTitle: {fontSize: 20, color: colors.text, fontWeight: '800'},
-  linkDialogCopy: {fontSize: 13, lineHeight: 19, color: colors.muted, marginTop: 7, marginBottom: 18},
-  selectedPdfRow: {flexDirection: 'row', alignItems: 'center', gap: 9, padding: 11, borderRadius: 11, backgroundColor: '#F0F1FF', marginBottom: 16},
-  selectedPdfName: {flex: 1, fontSize: 13, color: colors.text, fontWeight: '700'},
-  linkPasswordLabel: {fontSize: 13, color: colors.text, fontWeight: '700', marginBottom: 7},
-  linkPasswordInput: {minHeight: 52, borderWidth: 1, borderColor: '#CBD2E0', borderRadius: 12, paddingHorizontal: 13, color: colors.text, fontSize: 15, marginBottom: 14},
-  linkCancel: {minHeight: 43, alignItems: 'center', justifyContent: 'center'},
-  linkCancelText: {fontSize: 14, color: colors.muted, fontWeight: '600'},
   calendarCard: {paddingHorizontal: 7, paddingVertical: 15, marginBottom: 23},
   weekDays: {flexDirection: 'row', justifyContent: 'space-around'},
   dayCell: {alignItems: 'center', gap: 9},
