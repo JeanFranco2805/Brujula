@@ -9,6 +9,6 @@ import {StudyContentService} from './study-content.service';
   imports: [AuthModule],
   controllers: [MaterialsController],
   providers: [MaterialsService, PdfTextExtractorService, StudyContentService],
-  exports: [MaterialsService],
+  exports: [MaterialsService, StudyContentService],
 })
 export class MaterialsModule {}
