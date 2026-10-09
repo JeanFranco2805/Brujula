@@ -208,6 +208,34 @@ describe('Brújula API HTTP (e2e)', () => {
     expect(materials.create).toHaveBeenCalledWith(profile.id, expect.objectContaining({originalname: 'Clase.pdf'}));
   });
 
+  it('creates a study plan after a PDF is analyzed into topics', async () => {
+    const analyzedMaterial = {
+      ...material,
+      summary: 'La fotosíntesis convierte la luz en energía química.',
+      keyPoints: ['Captura de luz', 'Producción de glucosa'],
+      topics: [{title: 'Fotosíntesis', explanation: 'Proceso de conversión de luz.', questions: ['¿Qué función cumple la clorofila?']}],
+      analysisProvider: 'local',
+    };
+    const generatedSessions = [{id: 'session-1', materialId: material.id, topicIndex: 0, title: 'Fotosíntesis'}];
+    materials.create.mockResolvedValueOnce(analyzedMaterial);
+    plans.generate.mockResolvedValueOnce(generatedSessions);
+
+    const upload = await request(app.getHttpServer())
+      .post('/api/v1/materials')
+      .set('Authorization', 'Bearer valid-token')
+      .attach('file', Buffer.from('%PDF-study'), {filename: 'Biologia.pdf', contentType: 'application/pdf'})
+      .expect(201);
+    expect(upload.body.topics).toEqual(analyzedMaterial.topics);
+
+    const plan = await request(app.getHttpServer())
+      .post('/api/v1/study-plan/generate')
+      .set('Authorization', 'Bearer valid-token')
+      .send({})
+      .expect(201);
+    expect(plan.body).toEqual(generatedSessions);
+    expect(plans.generate).toHaveBeenCalledWith(profile.id, undefined, undefined);
+  });
+
   it('validates material UUIDs and removes only authorized materials', async () => {
     await request(app.getHttpServer())
       .get('/api/v1/materials/not-a-uuid')
