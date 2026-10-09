@@ -83,6 +83,12 @@ Las rutas privadas reciben `Authorization: Bearer <token>`. El servidor guarda c
 
 Si la API no responde, el registro y el login por correo usan el modo local del dispositivo. Esas cuentas y sus preferencias no se sincronizan con otros dispositivos. Al iniciar la API, las cuentas creadas localmente siguen disponibles en este dispositivo.
 
+### Importar un PDF y crear un plan
+
+Importar un PDF desde **Materiales** solo lo copia al almacenamiento privado del teléfono; esa acción no sube el archivo. Para generar un plan, toca **Crear plan de estudio** en el PDF. En ese momento la app envía una copia al backend, extrae sus temas y crea sesiones con el formato y la duración definidos en las preferencias. El PDF original sigue en el teléfono. Los PDFs escaneados sin texto seleccionable requieren OCR y todavía no se pueden analizar.
+
+Si la cuenta está en modo local, Brújula pide la contraseña una sola vez para crear o conectar la cuenta del servidor. El backend guarda la copia analizada y sus temas para que las sesiones y lecciones puedan abrirse desde la app. Esta build usa HTTP para alcanzar la API local configurada en `.env`; el teléfono debe estar en la misma red del computador y la API debe estar encendida.
+
 ### IA y apuntes de voz
 
 `backend/.env` puede configurar `OPENAI_API_KEY`, `OPENAI_STUDY_MODEL` y `OPENAI_TRANSCRIPTION_MODEL`. Sin clave, los PDFs se organizan con extracción local de texto; la transcripción de voz requiere la clave. Los PDFs escaneados que no contienen texto seleccionable todavía necesitan OCR. Se aceptan archivos de hasta 12 MB para PDF y 25 MB para audio.
