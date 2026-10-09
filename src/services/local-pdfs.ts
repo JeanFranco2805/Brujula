@@ -8,6 +8,15 @@ export type LocalPdf = {
   uri: string;
   size: number;
   importedAt: string;
+  analysis?: LocalPdfAnalysis;
+};
+
+export type LocalPdfAnalysis = {
+  materialId: string;
+  summary: string;
+  keyPoints: string[];
+  topics: {title: string; explanation: string; questions: string[]}[];
+  analysisProvider: 'openai' | 'local';
 };
 
 type PickedPdf = {uri: string; name: string; size?: number};
@@ -75,6 +84,27 @@ export async function deleteLocalPdf(ownerId: string, id: string) {
   if (!selected) return;
   await FileSystem.deleteAsync(selected.uri, {idempotent: true});
   await AsyncStorage.setItem(storageKey(ownerId), JSON.stringify(files.filter(file => file.id !== id)));
+}
+
+export async function saveLocalPdfAnalysis(ownerId: string, id: string, analysis: LocalPdfAnalysis) {
+  const files = await loadLocalPdfs(ownerId);
+  const selected = files.find(file => file.id === id);
+  if (!selected) throw new Error('No encontramos el PDF guardado en este dispositivo.');
+  const updated = {...selected, analysis};
+  await AsyncStorage.setItem(storageKey(ownerId), JSON.stringify(files.map(file => file.id === id ? updated : file)));
+  return updated;
+}
+
+export async function moveLocalPdfs(fromOwnerId: string, toOwnerId: string) {
+  if (fromOwnerId === toOwnerId) return;
+  const [source, destination] = await Promise.all([loadLocalPdfs(fromOwnerId), loadLocalPdfs(toOwnerId)]);
+  if (!source.length) return;
+  const destinationIds = new Set(destination.map(file => file.id));
+  await AsyncStorage.setItem(storageKey(toOwnerId), JSON.stringify([
+    ...source.filter(file => !destinationIds.has(file.id)),
+    ...destination,
+  ]));
+  await AsyncStorage.removeItem(storageKey(fromOwnerId));
 }
 
 export async function openLocalPdf(file: LocalPdf) {
