@@ -37,6 +37,14 @@
           "defaultChannel": "study-reminders"
         }
       ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
       "expo-sharing"
     ],
     "ios": {
