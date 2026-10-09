@@ -4,7 +4,7 @@ import {useAuth} from '../auth/AuthContext';
 import {MainApp, type TabKey} from './MainApp';
 
 export function AuthenticatedTab({tab}: {tab: TabKey}) {
-  const {user, token, signOut} = useAuth();
+  const {user, token, signOut, connectLocalAccount} = useAuth();
   if (!user) return null;
 
   return (
@@ -18,6 +18,8 @@ export function AuthenticatedTab({tab}: {tab: TabKey}) {
         ? {pathname: '/lesson', params: {materialId, topicIndex: String(topicIndex ?? 0)}}
         : '/lesson')}
       onOpenMaterials={() => router.push('/(tabs)/materials')}
+      onOpenPlan={() => router.push('/(tabs)/plan')}
+      onConnectLocalAccount={connectLocalAccount}
     />
   );
 }
