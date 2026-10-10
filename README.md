@@ -85,13 +85,13 @@ Si la API no responde, el registro y el login por correo usan el modo local del 
 
 ### Importar un PDF y crear un plan
 
-Importar un PDF desde **Materiales** solo lo copia al almacenamiento privado del teléfono; esa acción no sube el archivo. Para generar un plan, toca **Crear plan de estudio** en el PDF. En ese momento la app envía una copia al backend, extrae sus temas y crea sesiones con el formato y la duración definidos en las preferencias. El PDF original sigue en el teléfono. Los PDFs escaneados sin texto seleccionable requieren OCR y todavía no se pueden analizar.
+Importar un PDF desde **Materiales** lo copia al almacenamiento privado del teléfono. Al tocar **Crear plan de estudio**, `expo-pdf-text-extract` usa PDFKit en iOS y PDFBox en Android para extraer el texto directamente en el dispositivo. Brújula organiza ese texto en temas y preguntas de repaso, genera sesiones según los formatos, el ritmo y la duración elegidos, y guarda el análisis y el plan localmente. No se envían el PDF, el texto ni las sesiones a la API; no hay que conectar la cuenta ni volver a escribir la contraseña.
 
-Si la cuenta está en modo local, Brújula pide la contraseña una sola vez para crear o conectar la cuenta del servidor. El backend guarda la copia analizada y sus temas para que las sesiones y lecciones puedan abrirse desde la app. Esta build usa HTTP para alcanzar la API local configurada en `.env`; el teléfono debe estar en la misma red del computador y la API debe estar encendida.
+Esta organización local usa reglas de texto, no un modelo generativo. Funciona con PDFs que tengan texto seleccionable. Un documento escaneado que solo contiene imágenes requiere OCR local, todavía no incluido. El material y las sesiones quedan disponibles sin conexión.
 
 ### IA y apuntes de voz
 
-`backend/.env` puede configurar `OPENAI_API_KEY`, `OPENAI_STUDY_MODEL` y `OPENAI_TRANSCRIPTION_MODEL`. Sin clave, los PDFs se organizan con extracción local de texto; la transcripción de voz requiere la clave. Los PDFs escaneados que no contienen texto seleccionable todavía necesitan OCR. Se aceptan archivos de hasta 12 MB para PDF y 25 MB para audio.
+Las grabaciones de voz se guardan y se reproducen desde el almacenamiento privado del dispositivo. La transcripción local de voz todavía no está habilitada. El backend conserva sus endpoints de IA para otros clientes, pero Brújula no los usa para procesar los PDFs, los planes ni las grabaciones locales.
 
 ### Plan y recordatorios
 
