@@ -1,32 +1,30 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useState} from 'react';
 import {
   Alert,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import {Ionicons} from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
-import {RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder, useAudioRecorderState} from 'expo-audio';
+import {RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder, useAudioRecorderState} from 'expo-audio';
+import {extractText, isAvailable as isPdfTextExtractionAvailable} from 'expo-pdf-text-extract';
 import * as Speech from 'expo-speech';
-import {apiRequest} from '../api/client';
 import {cancelStudyReminder, exportSessionsToDeviceCalendar, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
-import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, moveLocalPdfs, openLocalPdf, saveLocalPdfAnalysis, type LocalPdf, type LocalPdfAnalysis} from '../services/local-pdfs';
+import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, openLocalPdf, saveLocalPdfAnalysis, type LocalPdf} from '../services/local-pdfs';
+import {analyzeLocalStudyText, generateLocalStudyPlan, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
+import {loadLocalStudyPlan, removeLocalMaterialSessions, replaceLocalMaterialSessions, saveLocalStudyPlan} from '../services/local-study-plan-store';
+import {deleteLocalVoiceNote, loadLocalVoiceNotes, saveLocalVoiceNote, type LocalVoiceNote} from '../services/local-voice-notes';
 import {AppPage, Brand, Pill, PrimaryButton, SectionHeading, SurfaceCard} from '../components/ui';
 import {colors, radius} from '../theme';
 import type {LearningFormat, UserProfile} from '../types';
 
 export type TabKey = 'home' | 'materials' | 'plan' | 'progress';
-type MaterialRecord = {id: string; originalName: string; fileSize: number; summary: string; keyPoints: string[]; topics: LocalPdfAnalysis['topics']; analysisProvider: 'openai' | 'local'};
-type Material = {id?: string; serverId?: string; name: string; topics: number; progress: number; summary?: string; isLocal?: boolean; localFile?: LocalPdf};
-type VoiceNoteRecord = {id: string; title: string; transcript: string; summary: string; keyPoints: string[]; createdAt: string};
-type StudySessionRecord = DeviceStudySession & {materialId: string; topicIndex: number; learningFormat: LearningFormat};
+type Material = {id: string; name: string; topics: number; summary?: string; localFile: LocalPdf};
+type StudySessionRecord = DeviceStudySession & LocalStudySession;
+type LocalMaterialContent = {id: string; originalName: string; summary: string; keyPoints: string[]; topics: StudyTopic[]};
 
 const formatLabels: Record<LearningFormat, string> = {
   read: 'Leer',
@@ -37,140 +35,73 @@ const formatLabels: Record<LearningFormat, string> = {
 
 export function MainApp({
   account,
-  accessToken,
   activeTab,
   onEditPreferences,
   onSignOut,
   onOpenLesson,
   onOpenMaterials,
   onOpenPlan,
-  onConnectLocalAccount,
 }: {
   account: UserProfile;
-  accessToken: string | null;
   activeTab: TabKey;
   onEditPreferences: () => void;
   onSignOut: () => void;
   onOpenLesson: (materialId?: string, topicIndex?: number) => void;
   onOpenMaterials: () => void;
   onOpenPlan: () => void;
-  onConnectLocalAccount: (password: string) => Promise<{user: UserProfile; accessToken: string}>;
 }) {
   const [materials, setMaterials] = useState<Material[]>([]);
   const [sessions, setSessions] = useState<StudySessionRecord[]>([]);
-  const [pendingPlanFile, setPendingPlanFile] = useState<LocalPdf | null>(null);
-  const [connectionPassword, setConnectionPassword] = useState('');
-  const [connectingForPlan, setConnectingForPlan] = useState(false);
   const [generatingPlanFor, setGeneratingPlanFor] = useState<string | null>(null);
   const firstName = account.name.trim().split(/\s+/)[0] || 'Estudiante';
 
   useEffect(() => {
     let active = true;
-    loadLocalPdfs(account.id)
-      .then(files => {
+    Promise.all([loadLocalPdfs(account.id), loadLocalStudyPlan(account.id)])
+      .then(([files, plan]) => {
         if (!active) return;
-        setMaterials(previous => {
-          const localMaterials = files.map(toLocalMaterial);
-          const localServerIds = new Set(localMaterials.map(material => material.serverId).filter((id): id is string => !!id));
-          return [...previous.filter(material => !material.isLocal && !localServerIds.has(material.id ?? '')), ...localMaterials];
-        });
+        setMaterials(files.map(toLocalMaterial));
+        setSessions(plan);
       })
       .catch(() => undefined);
     return () => { active = false; };
   }, [account.id]);
 
-  useEffect(() => {
-    let active = true;
-    if (!accessToken || accessToken.startsWith('local:')) return;
-    apiRequest<MaterialRecord[]>('/materials', {}, accessToken)
-      .then(records => {
-        if (!active) return;
-        setMaterials(previous => {
-          const localServerIds = new Set(previous.filter(material => material.isLocal).map(material => material.serverId).filter((id): id is string => !!id));
-          return [...previous.filter(material => material.isLocal), ...records.filter(record => !localServerIds.has(record.id)).map(toMaterial)];
-        });
-      })
-      .catch(() => undefined);
-    apiRequest<StudySessionRecord[]>('/study-plan', {}, accessToken)
-      .then(records => { if (active) setSessions(records); })
-      .catch(() => undefined);
-    return () => { active = false; };
-  }, [accessToken]);
-
-  const generatePlanFromPdf = async (file: LocalPdf, token: string, ownerId = account.id) => {
+  const generatePlanFromPdf = async (file: LocalPdf) => {
     if (generatingPlanFor) return;
-    if (file.size > 12 * 1024 * 1024) {
-      Alert.alert('PDF demasiado grande', 'Para analizarlo, el PDF debe pesar 12 MB o menos. El archivo original seguirá guardado en tu dispositivo.');
+    if (!isPdfTextExtractionAvailable()) {
+      Alert.alert('Actualiza Brújula', 'El análisis local del PDF requiere la versión instalada de Brújula; no funciona desde Expo Go.');
       return;
     }
-
     setGeneratingPlanFor(file.id);
     try {
-      const form = new FormData();
-      form.append('file', {uri: file.uri, name: file.name, type: 'application/pdf'} as unknown as Blob);
-      const analyzed = await apiRequest<MaterialRecord>('/materials', {method: 'POST', body: form}, token);
-      const analysis = {
-        materialId: analyzed.id,
-        summary: analyzed.summary,
-        keyPoints: analyzed.keyPoints ?? [],
-        topics: analyzed.topics ?? [],
-        analysisProvider: analyzed.analysisProvider,
-      } satisfies LocalPdfAnalysis;
-      const savedFile = await saveLocalPdfAnalysis(ownerId, file.id, analysis);
-      setMaterials(previous => [
-        ...previous.filter(material => material.id !== file.id && material.id !== analyzed.id),
-        toLocalMaterial(savedFile),
-      ]);
-
-      const generated = await apiRequest<StudySessionRecord[]>('/study-plan/generate', {method: 'POST', body: JSON.stringify({})}, token);
-      setSessions(generated);
-      await syncEnabledStudyTools(generated).catch(() => undefined);
-      Alert.alert('Tu plan está listo', `Extraímos ${analysis.topics.length} temas de “${file.name}” y organizamos ${generated.length} sesiones según tus preferencias. El PDF original sigue guardado en tu teléfono.`, [
+      const text = await extractText(file.uri);
+      const analysis = analyzeLocalStudyText(text);
+      const savedFile = await saveLocalPdfAnalysis(account.id, file.id, analysis);
+      const generated = generateLocalStudyPlan(file.id, analysis.topics, account.preferences);
+      const nextSessions = await replaceLocalMaterialSessions(account.id, file.id, generated);
+      setMaterials(previous => [...previous.filter(material => material.id !== file.id), toLocalMaterial(savedFile)]);
+      setSessions(nextSessions);
+      await syncEnabledStudyTools(nextSessions).catch(() => undefined);
+      Alert.alert('Tu plan está listo', `Organizamos ${analysis.topics.length} temas y ${generated.length} sesiones según tus preferencias. El PDF, los temas y el plan permanecen en este dispositivo.`, [
         {text: 'Ver mi plan', onPress: onOpenPlan},
         {text: 'Seguir aquí', style: 'cancel'},
       ]);
     } catch (error) {
-      Alert.alert('No se pudo crear el plan', error instanceof Error ? error.message : 'Revisa tu conexión al servidor y vuelve a intentarlo.');
+      Alert.alert('No se pudo crear el plan', error instanceof Error ? error.message : 'Comprueba que el PDF contenga texto seleccionable.');
     } finally {
       setGeneratingPlanFor(null);
     }
   };
 
-  const requestPlanForPdf = (file: LocalPdf) => {
-    if (accessToken?.startsWith('local:')) {
-      setPendingPlanFile(file);
-      return;
-    }
-    if (!accessToken) {
-      Alert.alert('Inicia sesión para crear tu plan', 'El PDF ya está guardado localmente. Inicia sesión cuando quieras analizarlo y generar las sesiones.');
-      return;
-    }
-    void generatePlanFromPdf(file, accessToken);
-  };
-
-  const connectAndGeneratePlan = async () => {
-    if (!pendingPlanFile || !connectionPassword) return;
-    setConnectingForPlan(true);
-    try {
-      const session = await onConnectLocalAccount(connectionPassword);
-      const file = pendingPlanFile;
-      await moveLocalPdfs(account.id, session.user.id);
-      setPendingPlanFile(null);
-      setConnectionPassword('');
-      void generatePlanFromPdf(file, session.accessToken, session.user.id);
-    } catch (error) {
-      Alert.alert('No se pudo conectar la cuenta', error instanceof Error ? error.message : 'Revisa la contraseña y la conexión al servidor.');
-    } finally {
-      setConnectingForPlan(false);
-    }
-  };
+  const requestPlanForPdf = (file: LocalPdf) => { void generatePlanFromPdf(file); };
 
   return (
     <AppPage edges={['top', 'right', 'left']}>
       <View style={styles.topbar}>
         <Brand compact />
         <View style={styles.topActions}>
-          <Pressable style={styles.topIconButton} onPress={() => Alert.alert('Recordatorios', 'Las notificaciones del dispositivo se conectarán en la siguiente etapa.')} accessibilityLabel="Recordatorios">
+          <Pressable style={styles.topIconButton} onPress={onOpenPlan} accessibilityLabel="Abrir plan y recordatorios">
             <Ionicons name="notifications-outline" size={20} color={colors.text} />
           </Pressable>
           <Pressable style={styles.avatar} onPress={onEditPreferences} accessibilityLabel="Editar preferencias de estudio">
@@ -181,37 +112,13 @@ export function MainApp({
 
       <ScrollView contentContainerStyle={styles.mainContent} showsVerticalScrollIndicator={false}>
         {activeTab === 'home' ? <HomeTab firstName={firstName} account={account} materials={materials} sessions={sessions} onContinue={onOpenLesson} onOpenMaterials={onOpenMaterials} onEditPreferences={onEditPreferences} /> : null}
-        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} accessToken={accessToken} materials={materials} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} onGeneratePlan={requestPlanForPdf} onOpenLesson={onOpenLesson} /> : null}
-        {activeTab === 'plan' ? <PlanTab accessToken={accessToken} onOpenLesson={onOpenLesson} /> : null}
+        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} materials={materials} sessions={sessions} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} onGeneratePlan={requestPlanForPdf} /> : null}
+        {activeTab === 'plan' ? <PlanTab ownerId={account.id} sessions={sessions} setSessions={setSessions} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'progress' ? <ProgressTab account={account} materials={materials} sessions={sessions} onEditPreferences={onEditPreferences} /> : null}
         <Pressable style={styles.signOut} onPress={() => Alert.alert('Cerrar sesión', '¿Quieres volver a la pantalla de acceso?', [{text: 'Cancelar', style: 'cancel'}, {text: 'Cerrar sesión', style: 'destructive', onPress: onSignOut}])}>
           <Ionicons name="log-out-outline" size={16} color={colors.muted} /><Text style={styles.signOutText}>Cerrar sesión</Text>
         </Pressable>
       </ScrollView>
-
-      <Modal visible={!!pendingPlanFile} transparent animationType="fade" onRequestClose={() => setPendingPlanFile(null)}>
-        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.linkDialog}>
-            <View style={styles.linkDialogIcon}><Ionicons name="sparkles-outline" size={23} color={colors.primary} /></View>
-            <Text style={styles.linkDialogTitle}>Crear plan de estudio</Text>
-            <Text style={styles.linkDialogCopy}>Para extraer los temas, se enviará una copia de “{pendingPlanFile?.name}” al servidor Brújula. El original permanece guardado en tu teléfono. Conecta esta cuenta local una vez para continuar.</Text>
-            <Text style={styles.linkPasswordLabel}>Contraseña de tu cuenta</Text>
-            <TextInput
-              value={connectionPassword}
-              onChangeText={setConnectionPassword}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-              placeholder="Contraseña"
-              placeholderTextColor={colors.muted}
-              style={styles.linkPasswordInput}
-              accessibilityLabel="Contraseña de tu cuenta"
-            />
-            <PrimaryButton title={connectingForPlan ? 'Conectando…' : 'Conectar y crear plan'} icon={connectingForPlan ? 'hourglass-outline' : 'sparkles-outline'} onPress={() => { void connectAndGeneratePlan(); }} disabled={connectingForPlan || !connectionPassword} />
-            <Pressable style={styles.linkCancel} onPress={() => { setPendingPlanFile(null); setConnectionPassword(''); }}><Text style={styles.linkCancelText}>Ahora no</Text></Pressable>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
 
     </AppPage>
   );
@@ -219,7 +126,7 @@ export function MainApp({
 
 function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMaterials, onEditPreferences}: {firstName: string; account: UserProfile; materials: Material[]; sessions: StudySessionRecord[]; onContinue: (materialId?: string, topicIndex?: number) => void; onOpenMaterials: () => void; onEditPreferences: () => void}) {
   const nextSession = sessions.find(session => session.status === 'planned');
-  const nextMaterial = materials.find(material => material.id === nextSession?.materialId || material.serverId === nextSession?.materialId) ?? materials[0];
+  const nextMaterial = materials.find(material => material.id === nextSession?.materialId) ?? materials[0];
   const completedThisWeek = getCurrentWeekSessions(sessions).filter(session => session.status === 'completed');
   return (
     <>
@@ -233,7 +140,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
         </View>
         <View style={styles.todayBody}>
           <View style={styles.subjectIcon}><Ionicons name="leaf-outline" size={27} color={colors.teal} /></View>
-          <View style={styles.todayCopy}><Text style={styles.todayTitle}>{nextSession?.title ?? nextMaterial?.name ?? 'Todavía no hay un plan'}</Text><Text style={styles.todayDetail}>{nextSession ? `${nextSession.date} · ${formatLabels[nextSession.learningFormat]}` : nextMaterial?.isLocal ? nextMaterial.topics ? `${nextMaterial.topics} temas organizados · plan listo.` : 'PDF guardado en este dispositivo.' : 'Importa un PDF para tenerlo a mano.'}</Text></View>
+          <View style={styles.todayCopy}><Text style={styles.todayTitle}>{nextSession?.title ?? nextMaterial?.name ?? 'Todavía no hay un plan'}</Text><Text style={styles.todayDetail}>{nextSession ? `${nextSession.date} · ${formatLabels[nextSession.learningFormat]}` : nextMaterial?.topics ? `${nextMaterial.topics} temas organizados · plan listo.` : nextMaterial ? 'PDF guardado en este dispositivo.' : 'Importa un PDF para tenerlo a mano.'}</Text></View>
         </View>
         <PrimaryButton title={nextSession ? 'Continuar estudiando' : 'Importar material'} icon={nextSession ? 'play' : 'add'} onPress={nextSession ? () => onContinue(nextSession.materialId, nextSession.topicIndex) : onOpenMaterials} />
       </View>
@@ -247,7 +154,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
       <SectionHeading title="Material reciente" action="Ver todo" onAction={onOpenMaterials} />
       <Pressable style={styles.materialMini} onPress={onOpenMaterials}>
         <View style={styles.pdfIcon}><Ionicons name={materials[0] ? 'document-text' : 'add'} size={20} color={colors.primary} /></View>
-        <View style={styles.materialMiniCopy}><Text style={styles.materialName}>{materials[0]?.name ?? 'Agrega tu primer material'}</Text><Text style={styles.materialMeta}>{materials[0]?.isLocal ? materials[0].topics ? `${materials[0].topics} temas · plan de estudio` : 'PDF guardado en este dispositivo' : materials[0] ? `${materials[0].topics} temas organizados` : 'Importa un PDF para guardarlo aquí'}</Text></View>
+        <View style={styles.materialMiniCopy}><Text style={styles.materialName}>{materials[0]?.name ?? 'Agrega tu primer material'}</Text><Text style={styles.materialMeta}>{materials[0]?.topics ? `${materials[0].topics} temas · plan de estudio` : materials[0] ? 'PDF guardado en este dispositivo' : 'Importa un PDF para guardarlo aquí'}</Text></View>
         <Ionicons name="chevron-forward" size={20} color={colors.muted} />
       </Pressable>
 
@@ -262,7 +169,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
   );
 }
 
-function MaterialsTab({ownerId, accessToken, materials, setMaterials, setSessions, generatingPlanFor, onGeneratePlan, onOpenLesson}: {ownerId: string; accessToken: string | null; materials: Material[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; onGeneratePlan: (file: LocalPdf) => void; onOpenLesson: () => void}) {
+function MaterialsTab({ownerId, materials, sessions, setMaterials, setSessions, generatingPlanFor, onGeneratePlan}: {ownerId: string; materials: Material[]; sessions: StudySessionRecord[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; onGeneratePlan: (file: LocalPdf) => void}) {
   const [uploading, setUploading] = useState(false);
 
   const importPdf = async () => {
@@ -281,76 +188,53 @@ function MaterialsTab({ownerId, accessToken, materials, setMaterials, setSession
   };
 
   const removeMaterial = (material: Material) => {
-    if (material.isLocal && material.localFile) {
-      const hasServerCopy = !!material.localFile.analysis?.materialId && !!accessToken && !accessToken.startsWith('local:');
-      Alert.alert('Eliminar PDF', hasServerCopy
-        ? `¿Quieres borrar “${material.name}” del dispositivo y del servidor? También se eliminarán sus sesiones.`
-        : `¿Quieres borrar “${material.name}” de este dispositivo?`, [
+    Alert.alert('Eliminar PDF', `¿Quieres borrar “${material.name}”, sus temas y sus sesiones de este dispositivo?`, [
         {text: 'Cancelar', style: 'cancel'},
         {text: 'Eliminar', style: 'destructive', onPress: () => {
           void (async () => {
-            if (hasServerCopy && material.localFile?.analysis?.materialId && accessToken) {
-              await apiRequest<{deleted: boolean}>(`/materials/${material.localFile.analysis.materialId}`, {method: 'DELETE'}, accessToken);
-              setSessions(previous => previous.filter(session => session.materialId !== material.localFile?.analysis?.materialId));
-            }
-            await deleteLocalPdf(ownerId, material.localFile!.id);
-            setMaterials(previous => previous.filter(item => item.id !== material.id && item.id !== material.localFile?.analysis?.materialId));
+            const nextSessions = await removeLocalMaterialSessions(ownerId, material.id);
+            await Promise.all(sessions.filter(session => session.materialId === material.id).map(session => cancelStudyReminder(session.id)));
+            await deleteLocalPdf(ownerId, material.id);
+            setSessions(nextSessions);
+            setMaterials(previous => previous.filter(item => item.id !== material.id));
           })()
             .catch(error => Alert.alert('No se pudo eliminar el PDF', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
         }},
       ]);
-      return;
-    }
-    if (!accessToken || !material.id) return;
-    Alert.alert('Eliminar material', `¿Quieres eliminar “${material.name}” y sus sesiones asociadas?`, [
-      {text: 'Cancelar', style: 'cancel'},
-      {text: 'Eliminar', style: 'destructive', onPress: () => {
-        void apiRequest<{deleted: boolean}>(`/materials/${material.id}`, {method: 'DELETE'}, accessToken)
-          .then(() => setMaterials(previous => previous.filter(item => item.id !== material.id)))
-          .catch(error => Alert.alert('No se pudo eliminar', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
-      }},
-    ]);
   };
 
   return (
     <>
       <Text style={styles.pageTitle}>Materiales</Text>
-      <Text style={styles.subGreeting}>Elige un PDF de Archivos. Se guarda en este dispositivo y no se sube a un servidor.</Text>
+      <Text style={styles.subGreeting}>Importa un PDF de tu dispositivo. El contenido y el plan se procesan y guardan solo aquí.</Text>
       <PrimaryButton title={uploading ? 'Guardando PDF…' : 'Importar PDF'} icon={uploading ? 'hourglass-outline' : 'add'} onPress={() => { void importPdf(); }} disabled={uploading} />
       <View style={styles.materialList}>
         {materials.map((material, index) => (
-          <Pressable key={material.id ?? `${material.name}-${index}`} style={styles.materialCard} onPress={() => {
-            if (material.localFile) void openLocalPdf(material.localFile).catch(error => Alert.alert('No se pudo abrir el PDF', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
-            else if (material.summary) Alert.alert(material.name, material.summary);
-            else onOpenLesson();
+          <Pressable key={material.id} style={styles.materialCard} onPress={() => {
+            void openLocalPdf(material.localFile).catch(error => Alert.alert('No se pudo abrir el PDF', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
           }}>
             <View style={[styles.pdfIcon, index % 2 === 1 && styles.pdfIconAlt]}><Ionicons name="document-text" size={21} color={index % 2 === 1 ? colors.teal : colors.primary} /></View>
-            <View style={styles.materialInfo}><Text numberOfLines={1} style={styles.materialName}>{material.name}</Text><Text style={styles.materialMeta}>{material.isLocal ? `En este dispositivo · ${formatFileSize(material.localFile?.size ?? 0)}` : `${material.topics} temas organizados`}</Text>
-              {!material.isLocal ? <><Text style={styles.progressLabel}>{material.progress} de {material.topics} temas</Text><View style={styles.progressTrackSmall}><View style={[styles.progressFillSmall, {width: `${material.topics ? (material.progress / material.topics) * 100 : 0}%`}]} /></View></> : null}
-              {material.isLocal && material.localFile ? <Pressable
+            <View style={styles.materialInfo}><Text numberOfLines={1} style={styles.materialName}>{material.name}</Text><Text style={styles.materialMeta}>En este dispositivo · {formatFileSize(material.localFile.size)}</Text>
+              <Pressable
                 style={styles.createPlanButton}
                 disabled={generatingPlanFor === material.localFile.id}
-                onPress={event => { event.stopPropagation(); onGeneratePlan(material.localFile!); }}
+                onPress={event => { event.stopPropagation(); onGeneratePlan(material.localFile); }}
                 accessibilityRole="button"
                 accessibilityLabel={`${generatingPlanFor === material.localFile.id ? 'Analizando' : material.topics ? 'Actualizar plan de estudio con' : 'Crear plan de estudio con'} ${material.name}`}
-              ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? 'Analizando PDF…' : material.topics ? `${material.topics} temas · Actualizar plan` : 'Crear plan de estudio'}</Text></Pressable> : null}
+              ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? 'Analizando PDF…' : material.topics ? `${material.topics} temas · Actualizar plan` : 'Crear plan de estudio'}</Text></Pressable>
             </View>
-            <View style={styles.materialActions}><Pressable onPress={event => { event.stopPropagation(); removeMaterial(material); }} hitSlop={10} accessibilityLabel={`Eliminar ${material.name}`}><Ionicons name="trash-outline" size={18} color={colors.muted} /></Pressable><Ionicons name={material.isLocal ? 'share-outline' : 'chevron-forward'} size={19} color={colors.muted} /></View>
+            <View style={styles.materialActions}><Pressable onPress={event => { event.stopPropagation(); removeMaterial(material); }} hitSlop={10} accessibilityLabel={`Eliminar ${material.name}`}><Ionicons name="trash-outline" size={18} color={colors.muted} /></Pressable><Ionicons name="share-outline" size={19} color={colors.muted} /></View>
           </Pressable>
         ))}
       </View>
-      <View style={styles.infoBox}><Ionicons name="phone-portrait-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>El PDF original se guarda en tu teléfono. Para crear el plan, Brújula enviará una copia al servidor para extraer temas y organizar sesiones según tus preferencias.</Text></View>
-      <VoiceNotesPanel accessToken={accessToken} />
+      <View style={styles.infoBox}><Ionicons name="phone-portrait-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Tus PDFs, temas y sesiones nunca se envían a una nube. Brújula los lee y los organiza dentro de este dispositivo.</Text></View>
+      <VoiceNotesPanel ownerId={ownerId} />
     </>
   );
 }
 
-function toMaterial(record: MaterialRecord): Material {
-  return {id: record.id, name: record.originalName, topics: record.topics?.length ?? 0, progress: 0, summary: record.summary};
-}
-
 function toLocalMaterial(file: LocalPdf): Material {
-  return {id: file.id, serverId: file.analysis?.materialId, name: file.name, topics: file.analysis?.topics.length ?? 0, progress: 0, summary: file.analysis?.summary, isLocal: true, localFile: file};
+  return {id: file.id, name: file.name, topics: file.analysis?.topics.length ?? 0, summary: file.analysis?.summary, localFile: file};
 }
 
 function formatFileSize(size: number) {
@@ -358,26 +242,24 @@ function formatFileSize(size: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function VoiceNotesPanel({accessToken}: {accessToken: string | null}) {
+function VoiceNotesPanel({ownerId}: {ownerId: string}) {
   const recorder = useAudioRecorder(RecordingPresets.LOW_QUALITY);
   const recorderState = useAudioRecorderState(recorder);
-  const [uploading, setUploading] = useState(false);
-  const [notes, setNotes] = useState<VoiceNoteRecord[]>([]);
+  const player = useAudioPlayer(null);
+  const playerStatus = useAudioPlayerStatus(player);
+  const [saving, setSaving] = useState(false);
+  const [notes, setNotes] = useState<LocalVoiceNote[]>([]);
+  const [playingNoteId, setPlayingNoteId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    if (!accessToken || accessToken.startsWith('local:')) return;
-    apiRequest<VoiceNoteRecord[]>('/voice-notes', {}, accessToken)
+    loadLocalVoiceNotes(ownerId)
       .then(records => { if (active) setNotes(records); })
       .catch(() => undefined);
     return () => { active = false; };
-  }, [accessToken]);
+  }, [ownerId]);
 
-  const recordOrTranscribe = async () => {
-    if (!accessToken || accessToken.startsWith('local:')) {
-      Alert.alert('Conecta Brújula API', 'Las notas de voz se guardan y transcriben en una cuenta conectada al backend.');
-      return;
-    }
+  const recordOrSaveLocally = async () => {
     if (!recorderState.isRecording) {
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
@@ -394,100 +276,89 @@ function VoiceNotesPanel({accessToken}: {accessToken: string | null}) {
       return;
     }
 
-    setUploading(true);
+    const durationMillis = recorderState.durationMillis;
+    setSaving(true);
     try {
       await recorder.stop();
       await setAudioModeAsync({allowsRecording: false, playsInSilentMode: true});
       if (!recorder.uri) throw new Error('No encontramos el archivo de audio grabado.');
-      const recordedAt = new Date().toLocaleString('sv-SE').replace(' ', '-').replace(/:/g, '-');
-      const fileName = `Apunte-${recordedAt}.m4a`;
-      const is3gp = fileName.toLowerCase().endsWith('.3gp');
-      const body = new FormData();
-      body.append('file', {uri: recorder.uri, name: fileName, type: is3gp ? 'audio/3gpp' : 'audio/mp4'} as unknown as Blob);
-      const note = await apiRequest<VoiceNoteRecord>('/voice-notes', {method: 'POST', body}, accessToken);
+      const note = await saveLocalVoiceNote(ownerId, recorder.uri, durationMillis);
       setNotes(previous => [note, ...previous]);
-      Alert.alert('Apunte guardado', note.summary);
+      Alert.alert('Audio guardado', 'El audio queda en este dispositivo. La transcripción local no está disponible todavía.');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Revisa la conexión y vuelve a intentarlo.';
+      const message = error instanceof Error ? error.message : 'Inténtalo otra vez.';
       Alert.alert('No se pudo guardar el apunte', message);
     } finally {
-      setUploading(false);
+      setSaving(false);
     }
   };
 
-  const removeNote = (note: VoiceNoteRecord) => {
-    if (!accessToken) return;
-    Alert.alert('Eliminar apunte', `¿Quieres eliminar “${note.title}” y su transcripción?`, [
+  const removeNote = (note: LocalVoiceNote) => {
+    Alert.alert('Eliminar audio', `¿Quieres eliminar “${note.title}” de este dispositivo?`, [
       {text: 'Cancelar', style: 'cancel'},
       {text: 'Eliminar', style: 'destructive', onPress: () => {
-        void apiRequest<{deleted: boolean}>(`/voice-notes/${note.id}`, {method: 'DELETE'}, accessToken)
+        void deleteLocalVoiceNote(ownerId, note.id)
           .then(() => setNotes(previous => previous.filter(item => item.id !== note.id)))
           .catch(error => Alert.alert('No se pudo eliminar', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
       }},
     ]);
   };
 
+  const playNote = (note: LocalVoiceNote) => {
+    if (playingNoteId === note.id && playerStatus.playing) {
+      player.pause();
+      return;
+    }
+    player.replace(note.uri);
+    player.play();
+    setPlayingNoteId(note.id);
+  };
+
   return (
     <SurfaceCard style={styles.voiceNotesCard}>
-      <View style={styles.voiceNotesHeading}><View style={{flex: 1}}><Text style={styles.sectionTitle}>Apuntes de voz</Text><Text style={styles.cardCaption}>Graba una idea y Brújula la transcribe y resume.</Text></View><Ionicons name="mic-outline" size={22} color={colors.primary} /></View>
+      <View style={styles.voiceNotesHeading}><View style={{flex: 1}}><Text style={styles.sectionTitle}>Apuntes de voz</Text><Text style={styles.cardCaption}>Graba y reproduce audios guardados solo en este dispositivo.</Text></View><Ionicons name="mic-outline" size={22} color={colors.primary} /></View>
       <PrimaryButton
-        title={uploading ? 'Transcribiendo…' : recorderState.isRecording ? `Detener y guardar · ${Math.round(recorderState.durationMillis / 1000)} s` : 'Grabar apunte'}
-        icon={uploading ? 'hourglass-outline' : recorderState.isRecording ? 'stop' : 'mic'}
-        onPress={() => { void recordOrTranscribe(); }}
-        disabled={uploading}
+        title={saving ? 'Guardando en este dispositivo…' : recorderState.isRecording ? `Detener y guardar · ${Math.round(recorderState.durationMillis / 1000)} s` : 'Grabar apunte'}
+        icon={saving ? 'hourglass-outline' : recorderState.isRecording ? 'stop' : 'mic'}
+        onPress={() => { void recordOrSaveLocally(); }}
+        disabled={saving}
       />
       {notes.slice(0, 4).map(note => (
-        <Pressable key={note.id} style={styles.voiceNoteRow} onPress={() => Alert.alert(note.title, `${note.summary}\n\n${note.transcript}`)}>
-          <View style={styles.voiceNoteIcon}><Ionicons name="mic-outline" size={17} color={colors.teal} /></View>
-          <View style={{flex: 1}}><Text style={styles.materialName}>{note.title}</Text><Text style={styles.materialMeta} numberOfLines={2}>{note.summary}</Text></View>
+        <Pressable key={note.id} style={styles.voiceNoteRow} onPress={() => playNote(note)}>
+          <View style={styles.voiceNoteIcon}><Ionicons name={playingNoteId === note.id && playerStatus.playing ? 'pause' : 'play'} size={17} color={colors.teal} /></View>
+          <View style={{flex: 1}}><Text style={styles.materialName}>{note.title}</Text><Text style={styles.materialMeta} numberOfLines={2}>Audio local · {Math.round(note.durationMillis / 1000)} s</Text></View>
           <Pressable onPress={event => { event.stopPropagation(); removeNote(note); }} hitSlop={10} accessibilityLabel={`Eliminar ${note.title}`}><Ionicons name="trash-outline" size={17} color={colors.muted} /></Pressable>
         </Pressable>
       ))}
-      {!notes.length ? <Text style={styles.cardCaption}>Tus transcripciones aparecerán aquí.</Text> : null}
+      {!notes.length ? <Text style={styles.cardCaption}>Tus grabaciones aparecerán aquí.</Text> : null}
     </SurfaceCard>
   );
 }
 
-function PlanTab({accessToken, onOpenLesson}: {accessToken: string | null; onOpenLesson: (materialId?: string, topicIndex?: number) => void}) {
-  const [sessions, setSessions] = useState<StudySessionRecord[]>([]);
+function PlanTab({ownerId, sessions, setSessions, onOpenLesson}: {ownerId: string; sessions: StudySessionRecord[]; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; onOpenLesson: (materialId?: string, topicIndex?: number) => void}) {
   const [busy, setBusy] = useState(false);
-  const loadPlan = useCallback(async () => {
-    if (!accessToken || accessToken.startsWith('local:')) return;
-    const result = await apiRequest<StudySessionRecord[]>('/study-plan', {}, accessToken);
-    if (result.length) {
-      setSessions(result);
-      await syncEnabledStudyTools(result).catch(() => undefined);
-      return;
-    }
-    const generated = await apiRequest<StudySessionRecord[]>('/study-plan/generate', {method: 'POST', body: JSON.stringify({})}, accessToken);
-    setSessions(generated);
-    await syncEnabledStudyTools(generated).catch(() => undefined);
-  }, [accessToken]);
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      void loadPlan().catch(error => Alert.alert('No se pudo cargar el plan', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [loadPlan]);
 
   const reschedule = (session: StudySessionRecord) => {
-    const tomorrow = new Date(`${session.date}T00:00:00`);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const nextDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+    const nextStudyDay = new Date(`${session.date}T00:00:00`);
+    do { nextStudyDay.setDate(nextStudyDay.getDate() + 1); } while (nextStudyDay.getDay() === 0 || nextStudyDay.getDay() === 6);
+    const nextDate = `${nextStudyDay.getFullYear()}-${String(nextStudyDay.getMonth() + 1).padStart(2, '0')}-${String(nextStudyDay.getDate()).padStart(2, '0')}`;
     Alert.alert('Reprogramar sesión', 'Moverla al siguiente día a las 6:30 p. m.:', [
       {text: 'Reprogramar', onPress: () => {
-        if (!accessToken || accessToken.startsWith('local:')) return;
-        void apiRequest<StudySessionRecord>(`/study-plan/${session.id}/schedule`, {method: 'PATCH', body: JSON.stringify({date: nextDate, startMinute: 1110})}, accessToken)
-          .then(() => loadPlan()).catch(error => Alert.alert('No se pudo reprogramar', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
+        void (async () => {
+          const next = sessions.map(item => item.id === session.id ? {...item, date: nextDate, startMinute: 18 * 60 + 30} : item);
+          await saveLocalStudyPlan(ownerId, next);
+          setSessions(next);
+          await syncEnabledStudyTools(next).catch(() => undefined);
+        })().catch(error => Alert.alert('No se pudo reprogramar', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
       }},
       {text: 'Cancelar', style: 'cancel'},
     ]);
   };
   const markComplete = async (session: StudySessionRecord) => {
-    if (!accessToken || accessToken.startsWith('local:')) return;
     try {
-      const updated = await apiRequest<StudySessionRecord>(`/study-plan/${session.id}/complete`, {method: 'PATCH'}, accessToken);
-      setSessions(previous => previous.map(item => item.id === updated.id ? updated : item));
+      const next = sessions.map(item => item.id === session.id ? {...item, status: 'completed' as const} : item);
+      await saveLocalStudyPlan(ownerId, next);
+      setSessions(next);
       await cancelStudyReminder(session.id);
     } catch (error) {
       Alert.alert('No se pudo actualizar la sesión', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
@@ -530,7 +401,7 @@ function PlanTab({accessToken, onOpenLesson}: {accessToken: string | null; onOpe
         const status = session.status === 'completed' ? 'done' : index === 0 ? 'next' : 'planned';
         return <SessionRow key={session.id} time={time} title={session.title} detail={`${dateLabel} · ${session.durationMinutes} min · ${formatLabels[session.learningFormat]}`} status={status} onPress={() => onOpenLesson(session.materialId, session.topicIndex)} onReschedule={session.status === 'planned' ? () => reschedule(session) : undefined} onComplete={session.status === 'planned' ? () => { void markComplete(session); } : undefined} />;
       })}
-      {!sessions.length ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Ve a Materiales y toca “Crear plan de estudio” en un PDF. Brújula analizará el contenido, propondrá sesiones según tus preferencias y podrás añadirlas a tu calendario.</Text></View> : null}
+        {!sessions.length ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Ve a Materiales y toca “Crear plan de estudio” en un PDF. Brújula lo analiza sin conexión y guarda las sesiones aquí mismo.</Text></View> : null}
     </>
   );
 }
@@ -548,12 +419,12 @@ function ProgressTab({account, materials, sessions, onEditPreferences}: {account
       </View>
       <SurfaceCard style={styles.progressSummary}>
         <Text style={styles.sectionTitle}>Temas en curso</Text>
-        {materials.filter(material => !material.isLocal || !!material.serverId).map(material => {
-          const completed = sessions.filter(session => (session.materialId === material.id || session.materialId === material.serverId) && session.status === 'completed').length;
+        {materials.map(material => {
+          const completed = sessions.filter(session => session.materialId === material.id && session.status === 'completed').length;
           const percent = material.topics ? Math.min(Math.round(completed / material.topics * 100), 100) : 0;
           return <ProgressTopic key={material.id ?? material.name} title={material.name} detail={`${completed} de ${material.topics} sesiones completadas`} percent={percent} />;
         })}
-        {!materials.some(material => !material.isLocal || !!material.serverId) ? <Text style={styles.cardCaption}>Los PDFs locales se guardan en Materiales. El progreso aparece cuando haya sesiones de estudio.</Text> : null}
+        {!materials.length ? <Text style={styles.cardCaption}>Los PDFs locales aparecen aquí cuando hayas creado un plan de estudio.</Text> : null}
       </SurfaceCard>
       <SurfaceCard style={styles.preferencesCard}>
         <Text style={styles.sectionTitle}>Preferencias de estudio</Text>
@@ -588,20 +459,25 @@ function getCurrentWeekDays() {
   });
 }
 
-export function LessonScreen({preferences, accessToken, materialId, topicIndex = 0, onBack}: {preferences: UserProfile['preferences']; accessToken: string | null; materialId?: string; topicIndex?: number; onBack: () => void}) {
+export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, onBack}: {ownerId: string; preferences: UserProfile['preferences']; materialId?: string; topicIndex?: number; onBack: () => void}) {
   const [mode, setMode] = useState<'read' | 'listen' | 'visual'>('read');
-  const [material, setMaterial] = useState<MaterialRecord | null>(null);
+  const [material, setMaterial] = useState<LocalMaterialContent | null>(null);
   const [showPractice, setShowPractice] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const suggested = useMemo(() => formatLabels[preferences.formats[0]] ?? 'Practicar', [preferences.formats]);
   useEffect(() => {
     let active = true;
-    if (!accessToken || accessToken.startsWith('local:') || !materialId) return;
-    apiRequest<MaterialRecord>(`/materials/${materialId}`, {}, accessToken)
-      .then(record => { if (active) setMaterial(record); })
+    if (!materialId) return;
+    loadLocalPdfs(ownerId)
+      .then(files => {
+        const file = files.find(item => item.id === materialId);
+        if (active && file?.analysis) {
+          setMaterial({id: file.id, originalName: file.name, summary: file.analysis.summary, keyPoints: file.analysis.keyPoints, topics: file.analysis.topics});
+        }
+      })
       .catch(error => Alert.alert('No se pudo abrir el tema', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
     return () => { active = false; };
-  }, [accessToken, materialId]);
+  }, [materialId, ownerId]);
   const topic = material?.topics[topicIndex];
   const keyPoints = topic ? [topic.title, topic.explanation, ...topic.questions.slice(0, 3)] : material?.keyPoints ?? [];
   const speechText = topic?.explanation ?? material?.summary ?? '';
@@ -643,7 +519,7 @@ export function LessonScreen({preferences, accessToken, materialId, topicIndex =
         {mode === 'visual' ? <VisualSummary points={keyPoints} /> : null}
         <SurfaceCard style={styles.sourceCard}><Ionicons name="document-text-outline" size={18} color={colors.muted} /><Text style={styles.sourceText}>{material ? `Organizado desde ${material.originalName}` : 'Contenido de tu sesión'}</Text></SurfaceCard>
         <PrimaryButton title={showPractice ? 'Ocultar preguntas' : `Practicar ${topic?.questions.length || 5} preguntas`} icon="help-circle-outline" onPress={() => {
-          if (!topic?.questions.length) { Alert.alert('Sin preguntas', 'Vuelve a procesar el PDF con la API y Brújula preparará preguntas para este tema.'); return; }
+          if (!topic?.questions.length) { Alert.alert('Sin preguntas', 'Vuelve a organizar el PDF para crear preguntas de repaso en este dispositivo.'); return; }
           setShowPractice(value => !value);
         }} />
         {showPractice ? topic?.questions.map((question, index) => <LessonSection key={`${index}-${question}`} title={`Pregunta ${index + 1}`} body={question} />) : null}
@@ -741,22 +617,12 @@ const styles = StyleSheet.create({
   materialCard: {flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, padding: 13, borderRadius: radius.md},
   materialActions: {flexDirection: 'row', alignItems: 'center', gap: 10},
   materialInfo: {flex: 1},
-  progressLabel: {fontSize: 11, color: colors.muted, marginTop: 9, marginBottom: 5},
   progressTrackSmall: {height: 5, backgroundColor: '#E7EAF0', borderRadius: 3, overflow: 'hidden', marginTop: 7},
   progressFillSmall: {height: 5, borderRadius: 3, backgroundColor: colors.teal},
   infoBox: {flexDirection: 'row', alignItems: 'flex-start', gap: 9, backgroundColor: '#F0F1FF', padding: 13, borderRadius: radius.sm, marginTop: 17},
   infoBoxText: {flex: 1, fontSize: 12, lineHeight: 18, color: colors.muted},
   createPlanButton: {alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 9, paddingVertical: 6, paddingHorizontal: 9, borderRadius: radius.pill, backgroundColor: '#EEEFFE'},
   createPlanButtonText: {fontSize: 11, color: colors.primary, fontWeight: '700'},
-  modalBackdrop: {flex: 1, justifyContent: 'center', alignItems: 'center', padding: 22, backgroundColor: 'rgba(17, 24, 39, 0.48)'},
-  linkDialog: {width: '100%', maxWidth: 420, padding: 22, borderRadius: radius.lg, backgroundColor: colors.surface},
-  linkDialogIcon: {width: 46, height: 46, borderRadius: 15, backgroundColor: '#F0F1FF', alignItems: 'center', justifyContent: 'center', marginBottom: 13},
-  linkDialogTitle: {fontSize: 20, color: colors.text, fontWeight: '800'},
-  linkDialogCopy: {fontSize: 13, lineHeight: 19, color: colors.muted, marginTop: 7, marginBottom: 18},
-  linkPasswordLabel: {fontSize: 13, color: colors.text, fontWeight: '700', marginBottom: 7},
-  linkPasswordInput: {minHeight: 52, borderWidth: 1, borderColor: '#CBD2E0', borderRadius: 12, paddingHorizontal: 13, color: colors.text, fontSize: 15, marginBottom: 14},
-  linkCancel: {minHeight: 43, alignItems: 'center', justifyContent: 'center'},
-  linkCancelText: {fontSize: 14, color: colors.muted, fontWeight: '600'},
   calendarCard: {paddingHorizontal: 7, paddingVertical: 15, marginBottom: 23},
   weekDays: {flexDirection: 'row', justifyContent: 'space-around'},
   dayCell: {alignItems: 'center', gap: 9},
