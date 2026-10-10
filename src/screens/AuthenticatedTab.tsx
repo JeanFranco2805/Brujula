@@ -4,13 +4,12 @@ import {useAuth} from '../auth/AuthContext';
 import {MainApp, type TabKey} from './MainApp';
 
 export function AuthenticatedTab({tab}: {tab: TabKey}) {
-  const {user, token, signOut, connectLocalAccount} = useAuth();
+  const {user, signOut} = useAuth();
   if (!user) return null;
 
   return (
     <MainApp
       account={user}
-      accessToken={token}
       activeTab={tab}
       onEditPreferences={() => router.push('/onboarding')}
       onSignOut={() => { void signOut().then(() => router.replace('/(auth)/login')); }}
@@ -19,7 +18,6 @@ export function AuthenticatedTab({tab}: {tab: TabKey}) {
         : '/lesson')}
       onOpenMaterials={() => router.push('/(tabs)/materials')}
       onOpenPlan={() => router.push('/(tabs)/plan')}
-      onConnectLocalAccount={connectLocalAccount}
     />
   );
 }
