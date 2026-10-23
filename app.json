@@ -25,9 +25,7 @@
       [
         "expo-calendar",
         {
-          "calendarPermission": "Brújula agrega tus sesiones de estudio al calendario que elijas.",
-          "writeOnlyCalendarPermission": "Brújula agrega tus sesiones de estudio al calendario.",
-          "writeOnlyAccess": true
+            "calendarPermission": "Brújula necesita administrar las sesiones que agregues al calendario de tu dispositivo."
         }
       ],
       [
