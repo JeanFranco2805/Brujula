@@ -23,7 +23,8 @@ describe('local study planner', () => {
     expect(result.topics).toHaveLength(2);
     expect(result.topics[0].title).toBe('TEMA 1: La célula');
     expect(result.topics[1].explanation).toContain('energía luminosa');
-    expect(result.topics[0].questions[0]).toContain('La célula');
+    expect(result.topics[0].questions[0]).toContain('_____');
+    expect(result.topics[0].questions[1]).toContain('_____');
     expect(result.keyPoints).toHaveLength(2);
     expect(result.summary).toContain('La fotosíntesis');
   });
@@ -61,7 +62,10 @@ describe('local study planner', () => {
     expect(plan).toHaveLength(4);
     expect(plan.map(session => session.learningFormat)).toEqual(['visual', 'practice', 'practice', 'practice']);
     expect(plan.every(session => session.durationMinutes === 40 && session.status === 'planned')).toBe(true);
+    expect(plan.every(session => session.reminderEnabled && session.reminderMinutesBefore === 10)).toBe(true);
     expect(plan[0].date).toBe('2026-10-06');
+    expect(plan.map(session => session.date)).toEqual(['2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09']);
+    expect(new Set(plan.map(session => session.date)).size).toBe(plan.length);
     expect(plan.every(session => !['2026-10-10', '2026-10-11'].includes(session.date))).toBe(true);
     expect(plan.slice(2).every(session => session.title.startsWith('Repaso: '))).toBe(true);
   });
