@@ -13,8 +13,8 @@ export function AuthenticatedTab({tab}: {tab: TabKey}) {
       activeTab={tab}
       onEditPreferences={() => router.push('/onboarding')}
       onSignOut={() => { void signOut().then(() => router.replace('/(auth)/login')); }}
-      onOpenLesson={(materialId, topicIndex) => router.push(materialId
-        ? {pathname: '/lesson', params: {materialId, topicIndex: String(topicIndex ?? 0)}}
+      onOpenLesson={(materialId, topicIndex, learningFormat) => router.push(materialId
+        ? {pathname: '/lesson', params: {materialId, topicIndex: String(topicIndex ?? 0), learningFormat: learningFormat ?? 'practice'}}
         : '/lesson')}
       onOpenMaterials={() => router.push('/(tabs)/materials')}
       onOpenPlan={() => router.push('/(tabs)/plan')}
