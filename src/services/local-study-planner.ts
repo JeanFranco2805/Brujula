@@ -19,6 +19,10 @@ export type LocalStudySession = {
   durationMinutes: number;
   learningFormat: LearningFormat;
   status: 'planned' | 'completed' | 'skipped';
+  /** 'reminder' entries are personal agenda items and do not open a PDF lesson. */
+  source?: 'material' | 'reminder';
+  reminderEnabled?: boolean;
+  reminderMinutesBefore?: number;
 };
 
 export class LocalPdfAnalysisError extends Error {
@@ -62,31 +66,53 @@ export function generateLocalStudyPlan(
 ): LocalStudySession[] {
   if (!materialId || !topics.length) return [];
   const formats = preferences.formats.length ? preferences.formats : ['practice' as const];
-  const tasks: {topicIndex: number; review: boolean}[] = topics.map((_, topicIndex) => ({topicIndex, review: false}));
+  let reviewCount = 0;
+  let reviewIntervalDays = 0;
   if (preferences.rhythm === 'spaced') {
-    const reviewCount = preferences.goal === 'exam' ? Math.min(5, topics.length) : Math.min(2, topics.length);
-    for (let index = 0; index < reviewCount; index += 1) {
-      const topicIndex = reviewCount === topics.length
-        ? index
-        : Math.round(index * (topics.length - 1) / Math.max(1, reviewCount - 1));
-      tasks.push({topicIndex, review: true});
-    }
+    reviewCount = preferences.goal === 'exam' ? Math.min(5, topics.length) : Math.min(2, topics.length);
+    reviewIntervalDays = preferences.goal === 'exam' ? 2 : 4;
   }
 
-  let studyDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  let taskIndex = 0;
-  const sessions: LocalStudySession[] = [];
-  while (taskIndex < tasks.length) {
-    studyDay.setDate(studyDay.getDate() + 1);
-    if (!isStudyDay(studyDay, preferences.goal)) continue;
+  const reviewTopics = new Set<number>();
+  for (let index = 0; index < reviewCount; index += 1) {
+    const topicIndex = reviewCount === topics.length
+      ? index
+      : Math.round(index * (topics.length - 1) / Math.max(1, reviewCount - 1));
+    reviewTopics.add(topicIndex);
+  }
 
-    const task = tasks[taskIndex];
+  const tasks: {topicIndex: number; review: boolean; date: Date}[] = [];
+  const pendingReviews: {topicIndex: number; date: Date}[] = [];
+  let topicIndex = 0;
+  let studyDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  studyDate = nextStudyDate(studyDate, preferences.goal, 1);
+  while (topicIndex < topics.length || pendingReviews.length) {
+    const dueReviewIndex = pendingReviews.findIndex(review => review.date <= studyDate);
+    if (dueReviewIndex >= 0) {
+      const [review] = pendingReviews.splice(dueReviewIndex, 1);
+      tasks.push({topicIndex: review.topicIndex, review: true, date: studyDate});
+    } else if (topicIndex < topics.length) {
+      const currentTopicIndex = topicIndex;
+      tasks.push({topicIndex: currentTopicIndex, review: false, date: studyDate});
+      topicIndex += 1;
+      if (reviewTopics.has(currentTopicIndex)) {
+        pendingReviews.push({topicIndex: currentTopicIndex, date: nextStudyDate(studyDate, preferences.goal, reviewIntervalDays)});
+        pendingReviews.sort((left, right) => left.date.getTime() - right.date.getTime());
+      }
+    } else if (pendingReviews.length) {
+      studyDate = pendingReviews[0].date;
+      continue;
+    }
+    studyDate = nextStudyDate(studyDate, preferences.goal, 1);
+  }
+
+  const sessions = tasks.map((task, taskIndex): LocalStudySession => {
     const topic = topics[task.topicIndex];
-    const date = formatLocalDate(studyDay);
     const format = task.review && preferences.goal === 'exam' && formats.includes('practice')
       ? 'practice'
       : formats[taskIndex % formats.length];
-    sessions.push({
+    const date = formatLocalDate(task.date);
+    return {
       id: `${materialId}:${date}:${task.topicIndex}:${task.review ? 'review' : 'learn'}`,
       materialId,
       topicIndex: task.topicIndex,
@@ -96,10 +122,12 @@ export function generateLocalStudyPlan(
       durationMinutes: preferences.minutesPerDay,
       learningFormat: format,
       status: 'planned',
-    });
-    taskIndex += 1;
-  }
-  return sessions;
+      source: 'material',
+      reminderEnabled: true,
+      reminderMinutesBefore: 10,
+    };
+  });
+  return sessions.sort((left, right) => left.date.localeCompare(right.date) || left.startMinute - right.startMinute || left.id.localeCompare(right.id));
 }
 
 export function formatLocalDate(date: Date) {
@@ -161,18 +189,48 @@ function topicsFromSentences(sentences: string[]): StudyTopic[] {
 
 function makeTopic(title: string, explanation: string): StudyTopic {
   const cleanTitle = title.trim() || 'Tema de estudio';
+  const displayTitle = cleanTitle.replace(/^(?:(?:unidad|cap[ií]tulo|tema|lecci[oó]n|secci[oó]n|m[oó]dulo|chapter|unit|section)\s+\d+(?:\.\d+)*\s*[:.)-]?\s*)/iu, '').trim() || cleanTitle;
+  const firstSentence = splitSentences(explanation)[0] ?? explanation;
+  const secondSentence = splitSentences(explanation)[1] ?? firstSentence;
+  const titleExercise = blankTerm(firstSentence, displayTitle);
+  const detailExercise = blankInformativeTerm(secondSentence, displayTitle);
   return {
     title: cleanTitle,
     explanation: explanation.slice(0, 1500),
     questions: [
-      `Explica con tus propias palabras la idea principal de “${cleanTitle}”.`,
-      `¿Qué ejemplo puedes relacionar con “${cleanTitle}”?`,
+      titleExercise ? `Completa sin mirar el PDF: ${titleExercise}` : `Explica con tus propias palabras la idea principal de “${displayTitle}”.`,
+      detailExercise ? `Recuerda este detalle del material: ${detailExercise}` : `¿Qué ejemplo puedes relacionar con “${displayTitle}”?`,
     ],
   };
+}
+
+function blankTerm(sentence: string, term: string) {
+  const index = sentence.toLocaleLowerCase().indexOf(term.toLocaleLowerCase());
+  if (index < 0 || term.length < 4) return null;
+  return `${sentence.slice(0, index)}_____ ${sentence.slice(index + term.length)}`.replace(/\s{2,}/g, ' ').trim();
+}
+
+function blankInformativeTerm(sentence: string, excludedPhrase: string) {
+  const excluded = excludedPhrase.toLocaleLowerCase();
+  const words = (sentence.match(/[\p{L}]{6,}/gu) ?? [])
+    .filter(word => !excluded.includes(word.toLocaleLowerCase()))
+    .sort((left, right) => right.length - left.length);
+  for (const word of words) {
+    const index = sentence.toLocaleLowerCase().indexOf(word.toLocaleLowerCase());
+    if (index >= 0) return `${sentence.slice(0, index)}_____ ${sentence.slice(index + word.length)}`.replace(/\s{2,}/g, ' ').trim();
+  }
+  return null;
 }
 
 function isStudyDay(date: Date, goal: StudyPreferences['goal']) {
   const day = date.getDay();
   if (day === 0 || day === 6) return false;
   return goal !== 'habit' || day === 1 || day === 3 || day === 5;
+}
+
+function nextStudyDate(after: Date, goal: StudyPreferences['goal'], minimumDays: number) {
+  const date = new Date(after.getFullYear(), after.getMonth(), after.getDate());
+  date.setDate(date.getDate() + minimumDays);
+  while (!isStudyDay(date, goal)) date.setDate(date.getDate() + 1);
+  return date;
 }
