@@ -61,4 +61,19 @@ describe('local study plan storage', () => {
     await saveLocalStudyPlan('broken', [session('good', 'pdf-1'), {id: 'bad'} as LocalStudySession]);
     await expect(loadLocalStudyPlan('broken')).resolves.toEqual([session('good', 'pdf-1')]);
   });
+
+  it('persists local reminder events and rejects invalid schedule values', async () => {
+    const reminder: LocalStudySession = {
+      ...session('reminder-1', ''),
+      topicIndex: -1,
+      source: 'reminder',
+      reminderEnabled: true,
+      reminderMinutesBefore: 15,
+    };
+    const invalid = {...reminder, id: 'bad-reminder', startMinute: 24 * 60, reminderMinutesBefore: 121};
+
+    await saveLocalStudyPlan('student', [reminder, invalid]);
+
+    await expect(loadLocalStudyPlan('student')).resolves.toEqual([reminder]);
+  });
 });
