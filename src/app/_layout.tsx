@@ -2,6 +2,7 @@ import React, {useEffect} from 'react';
 import {ActivityIndicator, StyleSheet, View} from 'react-native';
 import {Stack, useRouter, useSegments} from 'expo-router';
 import {StatusBar} from 'expo-status-bar';
+import * as Notifications from 'expo-notifications';
 import {SafeAreaProvider} from 'react-native-safe-area-context';
 import {AuthProvider, useAuth} from '../auth/AuthContext';
 import {colors} from '../theme';
@@ -15,6 +16,13 @@ function AuthNavigation() {
   const segments = useSegments();
   const router = useRouter();
   const firstSegment = segments[0];
+  const lastNotificationResponse = Notifications.useLastNotificationResponse();
+
+  useEffect(() => {
+    if (lastNotificationResponse?.notification.request.content.data?.brujulaStudyReminder !== true) return;
+    router.push('/(tabs)/plan');
+    Notifications.clearLastNotificationResponse();
+  }, [lastNotificationResponse, router]);
 
   useEffect(() => {
     if (loading) return;
