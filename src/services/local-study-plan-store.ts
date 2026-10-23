@@ -44,11 +44,35 @@ function isLocalStudySession(value: unknown): value is LocalStudySession {
   const session = value as Partial<LocalStudySession>;
   return typeof session.id === 'string'
     && typeof session.materialId === 'string'
+    && typeof session.topicIndex === 'number'
     && Number.isInteger(session.topicIndex)
     && typeof session.title === 'string'
-    && typeof session.date === 'string'
+    && session.title.trim().length > 0
+    && session.title.length <= 200
+    && isLocalDate(session.date)
+    && typeof session.startMinute === 'number'
     && Number.isInteger(session.startMinute)
+    && session.startMinute >= 0
+    && session.startMinute < 24 * 60
+    && typeof session.durationMinutes === 'number'
     && Number.isInteger(session.durationMinutes)
+    && session.durationMinutes > 0
+    && session.durationMinutes <= 360
+    && (session.source === undefined || ['material', 'reminder'].includes(session.source))
+    && (session.source === 'reminder' ? session.materialId === '' && session.topicIndex === -1 : session.materialId.length > 0 && session.topicIndex >= 0)
+    && (session.reminderEnabled === undefined || typeof session.reminderEnabled === 'boolean')
+    && (session.reminderMinutesBefore === undefined || (Number.isInteger(session.reminderMinutesBefore) && session.reminderMinutesBefore >= 0 && session.reminderMinutesBefore <= 120))
     && ['read', 'listen', 'visual', 'practice'].includes(session.learningFormat ?? '')
     && ['planned', 'completed', 'skipped'].includes(session.status ?? '');
+}
+
+function isLocalDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
 }
