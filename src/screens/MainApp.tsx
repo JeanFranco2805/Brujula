@@ -1,10 +1,14 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import {
   Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import {Ionicons} from '@expo/vector-icons';
@@ -12,9 +16,9 @@ import * as DocumentPicker from 'expo-document-picker';
 import {RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder, useAudioRecorderState} from 'expo-audio';
 import {extractText, isAvailable as isPdfTextExtractionAvailable} from 'expo-pdf-text-extract';
 import * as Speech from 'expo-speech';
-import {cancelStudyReminder, exportSessionsToDeviceCalendar, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
+import {cancelStudyReminder, exportSessionsToDeviceCalendar, removeSessionFromDeviceCalendar, scheduleStudyReminder, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
 import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, openLocalPdf, saveLocalPdfAnalysis, type LocalPdf} from '../services/local-pdfs';
-import {analyzeLocalStudyText, generateLocalStudyPlan, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
+import {analyzeLocalStudyText, formatLocalDate, generateLocalStudyPlan, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
 import {loadLocalStudyPlan, removeLocalMaterialSessions, replaceLocalMaterialSessions, saveLocalStudyPlan} from '../services/local-study-plan-store';
 import {deleteLocalVoiceNote, loadLocalVoiceNotes, saveLocalVoiceNote, type LocalVoiceNote} from '../services/local-voice-notes';
 import {AppPage, Brand, Pill, PrimaryButton, SectionHeading, SurfaceCard} from '../components/ui';
@@ -32,6 +36,7 @@ const formatLabels: Record<LearningFormat, string> = {
   visual: 'Ver esquemas',
   practice: 'Practicar',
 };
+const lessonModesByFormat: Record<LearningFormat, 'read' | 'listen' | 'visual' | 'practice'> = {read: 'read', listen: 'listen', visual: 'visual', practice: 'practice'};
 
 export function MainApp({
   account,
@@ -46,7 +51,7 @@ export function MainApp({
   activeTab: TabKey;
   onEditPreferences: () => void;
   onSignOut: () => void;
-  onOpenLesson: (materialId?: string, topicIndex?: number) => void;
+  onOpenLesson: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void;
   onOpenMaterials: () => void;
   onOpenPlan: () => void;
 }) {
@@ -82,7 +87,7 @@ export function MainApp({
       const nextSessions = await replaceLocalMaterialSessions(account.id, file.id, generated);
       setMaterials(previous => [...previous.filter(material => material.id !== file.id), toLocalMaterial(savedFile)]);
       setSessions(nextSessions);
-      await syncEnabledStudyTools(nextSessions).catch(() => undefined);
+      await syncEnabledStudyTools(account.id, nextSessions).catch(() => undefined);
       Alert.alert('Tu plan está listo', `Organizamos ${analysis.topics.length} temas y ${generated.length} sesiones según tus preferencias. El PDF, los temas y el plan permanecen en este dispositivo.`, [
         {text: 'Ver mi plan', onPress: onOpenPlan},
         {text: 'Seguir aquí', style: 'cancel'},
@@ -111,8 +116,8 @@ export function MainApp({
       </View>
 
       <ScrollView contentContainerStyle={styles.mainContent} showsVerticalScrollIndicator={false}>
-        {activeTab === 'home' ? <HomeTab firstName={firstName} account={account} materials={materials} sessions={sessions} onContinue={onOpenLesson} onOpenMaterials={onOpenMaterials} onEditPreferences={onEditPreferences} /> : null}
-        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} materials={materials} sessions={sessions} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} onGeneratePlan={requestPlanForPdf} /> : null}
+        {activeTab === 'home' ? <HomeTab firstName={firstName} account={account} materials={materials} sessions={sessions} onContinue={onOpenLesson} onOpenMaterials={onOpenMaterials} onOpenPlan={onOpenPlan} onEditPreferences={onEditPreferences} /> : null}
+        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} preferences={account.preferences} materials={materials} sessions={sessions} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} onGeneratePlan={requestPlanForPdf} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'plan' ? <PlanTab ownerId={account.id} sessions={sessions} setSessions={setSessions} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'progress' ? <ProgressTab account={account} materials={materials} sessions={sessions} onEditPreferences={onEditPreferences} /> : null}
         <Pressable style={styles.signOut} onPress={() => Alert.alert('Cerrar sesión', '¿Quieres volver a la pantalla de acceso?', [{text: 'Cancelar', style: 'cancel'}, {text: 'Cerrar sesión', style: 'destructive', onPress: onSignOut}])}>
@@ -124,8 +129,9 @@ export function MainApp({
   );
 }
 
-function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMaterials, onEditPreferences}: {firstName: string; account: UserProfile; materials: Material[]; sessions: StudySessionRecord[]; onContinue: (materialId?: string, topicIndex?: number) => void; onOpenMaterials: () => void; onEditPreferences: () => void}) {
-  const nextSession = sessions.find(session => session.status === 'planned');
+function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMaterials, onOpenPlan, onEditPreferences}: {firstName: string; account: UserProfile; materials: Material[]; sessions: StudySessionRecord[]; onContinue: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void; onOpenMaterials: () => void; onOpenPlan: () => void; onEditPreferences: () => void}) {
+  const nextSession = sessions.find(session => session.status === 'planned' && session.materialId);
+  const nextReminder = sessions.find(session => session.status === 'planned' && !session.materialId);
   const nextMaterial = materials.find(material => material.id === nextSession?.materialId) ?? materials[0];
   const completedThisWeek = getCurrentWeekSessions(sessions).filter(session => session.status === 'completed');
   return (
@@ -140,9 +146,9 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
         </View>
         <View style={styles.todayBody}>
           <View style={styles.subjectIcon}><Ionicons name="leaf-outline" size={27} color={colors.teal} /></View>
-          <View style={styles.todayCopy}><Text style={styles.todayTitle}>{nextSession?.title ?? nextMaterial?.name ?? 'Todavía no hay un plan'}</Text><Text style={styles.todayDetail}>{nextSession ? `${nextSession.date} · ${formatLabels[nextSession.learningFormat]}` : nextMaterial?.topics ? `${nextMaterial.topics} temas organizados · plan listo.` : nextMaterial ? 'PDF guardado en este dispositivo.' : 'Importa un PDF para tenerlo a mano.'}</Text></View>
+          <View style={styles.todayCopy}><Text style={styles.todayTitle}>{nextSession?.title ?? nextReminder?.title ?? nextMaterial?.name ?? 'Todavía no hay un plan'}</Text><Text style={styles.todayDetail}>{nextSession ? `${nextSession.date} · ${formatLabels[nextSession.learningFormat]}` : nextReminder ? `${nextReminder.date} · recordatorio personal` : nextMaterial?.topics ? `${nextMaterial.topics} temas organizados · plan listo.` : nextMaterial ? 'PDF guardado en este dispositivo.' : 'Importa un PDF para tenerlo a mano.'}</Text></View>
         </View>
-        <PrimaryButton title={nextSession ? 'Continuar estudiando' : 'Importar material'} icon={nextSession ? 'play' : 'add'} onPress={nextSession ? () => onContinue(nextSession.materialId, nextSession.topicIndex) : onOpenMaterials} />
+        <PrimaryButton title={nextSession ? 'Continuar estudiando' : nextReminder ? 'Ver calendario' : 'Importar material'} icon={nextSession ? 'play' : nextReminder ? 'calendar-outline' : 'add'} onPress={nextSession ? () => onContinue(nextSession.materialId, nextSession.topicIndex, nextSession.learningFormat) : nextReminder ? onOpenPlan : onOpenMaterials} />
       </View>
 
       <SurfaceCard style={styles.weekCard}>
@@ -169,7 +175,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
   );
 }
 
-function MaterialsTab({ownerId, materials, sessions, setMaterials, setSessions, generatingPlanFor, onGeneratePlan}: {ownerId: string; materials: Material[]; sessions: StudySessionRecord[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; onGeneratePlan: (file: LocalPdf) => void}) {
+function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, setSessions, generatingPlanFor, onGeneratePlan, onOpenLesson}: {ownerId: string; preferences: UserProfile['preferences']; materials: Material[]; sessions: StudySessionRecord[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; onGeneratePlan: (file: LocalPdf) => void; onOpenLesson: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void}) {
   const [uploading, setUploading] = useState(false);
 
   const importPdf = async () => {
@@ -193,7 +199,11 @@ function MaterialsTab({ownerId, materials, sessions, setMaterials, setSessions, 
         {text: 'Eliminar', style: 'destructive', onPress: () => {
           void (async () => {
             const nextSessions = await removeLocalMaterialSessions(ownerId, material.id);
-            await Promise.all(sessions.filter(session => session.materialId === material.id).map(session => cancelStudyReminder(session.id)));
+            const removedSessions = sessions.filter(session => session.materialId === material.id);
+            await Promise.all(removedSessions.flatMap(session => [
+              cancelStudyReminder(ownerId, session.id),
+              removeSessionFromDeviceCalendar(ownerId, session.id),
+            ]));
             await deleteLocalPdf(ownerId, material.id);
             setSessions(nextSessions);
             setMaterials(previous => previous.filter(item => item.id !== material.id));
@@ -210,21 +220,31 @@ function MaterialsTab({ownerId, materials, sessions, setMaterials, setSessions, 
       <PrimaryButton title={uploading ? 'Guardando PDF…' : 'Importar PDF'} icon={uploading ? 'hourglass-outline' : 'add'} onPress={() => { void importPdf(); }} disabled={uploading} />
       <View style={styles.materialList}>
         {materials.map((material, index) => (
-          <Pressable key={material.id} style={styles.materialCard} onPress={() => {
-            void openLocalPdf(material.localFile).catch(error => Alert.alert('No se pudo abrir el PDF', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
-          }}>
-            <View style={[styles.pdfIcon, index % 2 === 1 && styles.pdfIconAlt]}><Ionicons name="document-text" size={21} color={index % 2 === 1 ? colors.teal : colors.primary} /></View>
-            <View style={styles.materialInfo}><Text numberOfLines={1} style={styles.materialName}>{material.name}</Text><Text style={styles.materialMeta}>En este dispositivo · {formatFileSize(material.localFile.size)}</Text>
-              <Pressable
-                style={styles.createPlanButton}
-                disabled={generatingPlanFor === material.localFile.id}
-                onPress={event => { event.stopPropagation(); onGeneratePlan(material.localFile); }}
-                accessibilityRole="button"
-                accessibilityLabel={`${generatingPlanFor === material.localFile.id ? 'Analizando' : material.topics ? 'Actualizar plan de estudio con' : 'Crear plan de estudio con'} ${material.name}`}
-              ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? 'Analizando PDF…' : material.topics ? `${material.topics} temas · Actualizar plan` : 'Crear plan de estudio'}</Text></Pressable>
+          <View key={material.id} style={styles.materialCard}>
+            <View style={styles.materialCardMain}>
+              <Pressable style={styles.materialOpen} onPress={() => {
+                void openLocalPdf(material.localFile).catch(error => Alert.alert('No se pudo abrir el PDF', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
+              }} accessibilityRole="button" accessibilityLabel={`Abrir ${material.name}`}>
+                <View style={[styles.pdfIcon, index % 2 === 1 && styles.pdfIconAlt]}><Ionicons name="document-text" size={21} color={index % 2 === 1 ? colors.teal : colors.primary} /></View>
+                <View style={styles.materialInfo}><Text numberOfLines={1} style={styles.materialName}>{material.name}</Text><Text style={styles.materialMeta}>En este dispositivo · {formatFileSize(material.localFile.size)}</Text></View>
+              </Pressable>
+              <Pressable style={styles.deleteMaterialButton} onPress={() => removeMaterial(material)} hitSlop={10} accessibilityLabel={`Eliminar ${material.name}`}><Ionicons name="trash-outline" size={18} color={colors.muted} /></Pressable>
             </View>
-            <View style={styles.materialActions}><Pressable onPress={event => { event.stopPropagation(); removeMaterial(material); }} hitSlop={10} accessibilityLabel={`Eliminar ${material.name}`}><Ionicons name="trash-outline" size={18} color={colors.muted} /></Pressable><Ionicons name="share-outline" size={19} color={colors.muted} /></View>
-          </Pressable>
+            <Pressable
+              style={styles.createPlanButton}
+              disabled={generatingPlanFor === material.localFile.id}
+              onPress={() => onGeneratePlan(material.localFile)}
+              accessibilityRole="button"
+              accessibilityLabel={`${generatingPlanFor === material.localFile.id ? 'Analizando' : material.topics ? 'Actualizar plan de estudio con' : 'Crear plan de estudio con'} ${material.name}`}
+            ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? 'Analizando el contenido local…' : material.topics ? `${material.topics} temas · Actualizar plan` : 'Crear plan de estudio desde este PDF'}</Text></Pressable>
+            {material.localFile.analysis ? <View style={styles.analysisPreview}>
+              <Text style={styles.analysisSummary} numberOfLines={3}>{material.localFile.analysis.summary}</Text>
+              <Text style={styles.analysisTopicsTitle}>Temas organizados · toca uno para estudiar</Text>
+              {material.localFile.analysis.topics.map((topic, topicIndex) => <Pressable key={`${material.id}-${topicIndex}`} style={styles.analysisTopic} onPress={() => onOpenLesson(material.id, topicIndex, preferences.formats[topicIndex % preferences.formats.length] ?? 'practice')}>
+                <Text style={styles.analysisTopicText} numberOfLines={1}>{topic.title}</Text><Ionicons name="chevron-forward" size={16} color={colors.primary} />
+              </Pressable>)}
+            </View> : null}
+          </View>
         ))}
       </View>
       <View style={styles.infoBox}><Ionicons name="phone-portrait-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Tus PDFs, temas y sesiones nunca se envían a una nube. Brújula los lee y los organiza dentro de este dispositivo.</Text></View>
@@ -335,73 +355,225 @@ function VoiceNotesPanel({ownerId}: {ownerId: string}) {
   );
 }
 
-function PlanTab({ownerId, sessions, setSessions, onOpenLesson}: {ownerId: string; sessions: StudySessionRecord[]; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; onOpenLesson: (materialId?: string, topicIndex?: number) => void}) {
+function PlanTab({ownerId, sessions, setSessions, onOpenLesson}: {ownerId: string; sessions: StudySessionRecord[]; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; onOpenLesson: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void}) {
   const [busy, setBusy] = useState(false);
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [selectedDate, setSelectedDate] = useState(() => formatLocalDate(new Date()));
+  const [hasChosenDate, setHasChosenDate] = useState(false);
+  const [editor, setEditor] = useState<StudySessionRecord | null | undefined>(undefined);
+  const [draft, setDraft] = useState({title: '', startMinute: 18 * 60, durationMinutes: 25, reminderEnabled: true, reminderMinutesBefore: 10});
+  const [calendarStatus, setCalendarStatus] = useState<string | null>(null);
+  const [reminderStatus, setReminderStatus] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const reschedule = (session: StudySessionRecord) => {
-    const nextStudyDay = new Date(`${session.date}T00:00:00`);
-    do { nextStudyDay.setDate(nextStudyDay.getDate() + 1); } while (nextStudyDay.getDay() === 0 || nextStudyDay.getDay() === 6);
-    const nextDate = `${nextStudyDay.getFullYear()}-${String(nextStudyDay.getMonth() + 1).padStart(2, '0')}-${String(nextStudyDay.getDate()).padStart(2, '0')}`;
-    Alert.alert('Reprogramar sesión', 'Moverla al siguiente día a las 6:30 p. m.:', [
-      {text: 'Reprogramar', onPress: () => {
+  const todayDate = formatLocalDate(new Date());
+  const nextPlannedDate = sessions
+    .filter(session => session.status === 'planned' && session.date >= todayDate)
+    .map(session => session.date)
+    .sort()[0];
+  const displayedDate = hasChosenDate ? selectedDate : sessions.some(session => session.date === todayDate) ? todayDate : nextPlannedDate ?? todayDate;
+  const displayedWeekOffset = hasChosenDate ? weekOffset : getWeekOffsetForDate(displayedDate);
+  const weekDays = getWeekDays(displayedWeekOffset);
+  const selectedDaySessions = sessions
+    .filter(session => session.date === displayedDate)
+    .sort((left, right) => left.startMinute - right.startMinute || left.title.localeCompare(right.title));
+
+  const moveWeek = (amount: number) => {
+    const nextOffset = displayedWeekOffset + amount;
+    const currentDayIndex = (new Date(`${displayedDate}T00:00:00`).getDay() + 6) % 7;
+    setWeekOffset(nextOffset);
+    setSelectedDate(formatLocalDate(getWeekDays(nextOffset)[currentDayIndex].date));
+    setHasChosenDate(true);
+  };
+
+  const openEditor = (session?: StudySessionRecord) => {
+    setEditor(session ?? null);
+    setDraft(session ? {
+      title: session.title,
+      startMinute: session.startMinute,
+      durationMinutes: session.durationMinutes,
+      reminderEnabled: session.reminderEnabled !== false,
+      reminderMinutesBefore: session.reminderMinutesBefore ?? 10,
+    } : {title: '', startMinute: 18 * 60, durationMinutes: 25, reminderEnabled: true, reminderMinutesBefore: 10});
+    setReminderStatus(null);
+    setCalendarStatus(null);
+    setFormError(null);
+  };
+
+  const persistSessions = async (nextSessions: StudySessionRecord[]) => {
+    const ordered = [...nextSessions].sort((left, right) => left.date.localeCompare(right.date) || left.startMinute - right.startMinute || left.title.localeCompare(right.title));
+    await saveLocalStudyPlan(ownerId, ordered);
+    setSessions(ordered);
+    return syncEnabledStudyTools(ownerId, ordered);
+  };
+
+  const saveSession = async () => {
+    const title = draft.title.trim();
+    if (!title) return;
+    const [year, month, day] = displayedDate.split('-').map(Number);
+    const startDate = new Date(year, month - 1, day, Math.floor(draft.startMinute / 60), draft.startMinute % 60);
+    const reminderDate = startDate.getTime() - draft.reminderMinutesBefore * 60_000;
+    if (startDate.getTime() <= Date.now() || (draft.reminderEnabled && reminderDate <= Date.now())) {
+      setFormError(draft.reminderEnabled ? 'Elige una hora que deje tiempo para recibir el aviso.' : 'Elige una hora futura para el evento.');
+      return;
+    }
+    setFormError(null);
+
+    const previous = editor ?? {
+      id: `reminder-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      materialId: '',
+      topicIndex: -1,
+      title,
+      date: displayedDate,
+      startMinute: draft.startMinute,
+      durationMinutes: draft.durationMinutes,
+      learningFormat: 'practice' as const,
+      status: 'planned' as const,
+      source: 'reminder' as const,
+    };
+    const saved: StudySessionRecord = {
+      ...previous,
+      title,
+      date: displayedDate,
+      startMinute: draft.startMinute,
+      durationMinutes: draft.durationMinutes,
+      reminderEnabled: draft.reminderEnabled,
+      reminderMinutesBefore: draft.reminderMinutesBefore,
+    };
+    const next = editor
+      ? sessions.map(session => session.id === editor.id ? saved : session)
+      : [...sessions, saved];
+
+    setBusy(true);
+    try {
+      await saveLocalStudyPlan(ownerId, next);
+      const ordered = [...next].sort((left, right) => left.date.localeCompare(right.date) || left.startMinute - right.startMinute || left.title.localeCompare(right.title));
+      setSessions(ordered);
+      setEditor(undefined);
+      const failures: string[] = [];
+      try { await syncEnabledStudyTools(ownerId, ordered); }
+      catch (error) { failures.push(error instanceof Error ? error.message : 'No se pudo actualizar el calendario del dispositivo.'); }
+      try {
+        if (draft.reminderEnabled) await scheduleStudyReminder(ownerId, saved);
+        else await cancelStudyReminder(ownerId, saved.id);
+      } catch (error) { failures.push(error instanceof Error ? error.message : 'No se pudo programar la notificación local.'); }
+      if (failures.length) setReminderStatus(`El evento quedó en tu agenda local. ${failures.join(' ')}`);
+      else setReminderStatus(draft.reminderEnabled ? `Aviso local programado para ${formatTime(draft.startMinute - draft.reminderMinutesBefore)}.` : 'Evento guardado en tu agenda local.');
+    } catch (error) {
+      Alert.alert('No se pudo guardar el evento', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteSession = (session: StudySessionRecord) => {
+    Alert.alert('Eliminar de la agenda', `¿Quieres eliminar “${session.title}” y su aviso de este dispositivo?`, [
+      {text: 'Cancelar', style: 'cancel'},
+      {text: 'Eliminar', style: 'destructive', onPress: () => {
         void (async () => {
-          const next = sessions.map(item => item.id === session.id ? {...item, date: nextDate, startMinute: 18 * 60 + 30} : item);
+          const next = sessions.filter(item => item.id !== session.id);
           await saveLocalStudyPlan(ownerId, next);
           setSessions(next);
-          await syncEnabledStudyTools(next).catch(() => undefined);
-        })().catch(error => Alert.alert('No se pudo reprogramar', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
+          await Promise.all([cancelStudyReminder(ownerId, session.id), removeSessionFromDeviceCalendar(ownerId, session.id)]);
+          await syncEnabledStudyTools(ownerId, next);
+        })().catch(error => Alert.alert('No se pudo eliminar el evento', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
       }},
-      {text: 'Cancelar', style: 'cancel'},
     ]);
   };
+
   const markComplete = async (session: StudySessionRecord) => {
     try {
       const next = sessions.map(item => item.id === session.id ? {...item, status: 'completed' as const} : item);
-      await saveLocalStudyPlan(ownerId, next);
-      setSessions(next);
-      await cancelStudyReminder(session.id);
+      await persistSessions(next);
+      await cancelStudyReminder(ownerId, session.id);
     } catch (error) {
       Alert.alert('No se pudo actualizar la sesión', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
     }
   };
+
   const prepareReminders = async () => {
     setBusy(true);
     try {
-      const count = await scheduleStudyReminders(sessions);
-      Alert.alert('Recordatorios listos', count ? `Programamos ${count} notificaciones para tus sesiones pendientes.` : 'No hay sesiones futuras en este plan.');
-    } catch (error) { Alert.alert('No se pudieron activar los recordatorios', error instanceof Error ? error.message : 'Inténtalo de nuevo.'); }
+      const count = await scheduleStudyReminders(ownerId, sessions);
+      setReminderStatus(count ? `${count} avisos quedaron programados en este dispositivo.` : 'No hay sesiones futuras con avisos activados.');
+    } catch (error) { setReminderStatus(error instanceof Error ? error.message : 'No se pudieron activar las notificaciones.'); }
     finally { setBusy(false); }
   };
+
   const exportCalendar = async () => {
     setBusy(true);
     try {
-      const count = await exportSessionsToDeviceCalendar(sessions);
-      Alert.alert('Calendario actualizado', count ? `Añadimos ${count} sesiones al calendario de tu dispositivo.` : 'Las sesiones ya estaban en tu calendario o no hay sesiones pendientes.');
-    } catch (error) { Alert.alert('No se pudo acceder al calendario', error instanceof Error ? error.message : 'Inténtalo de nuevo.'); }
+      const {created, updated} = await exportSessionsToDeviceCalendar(ownerId, sessions);
+      setCalendarStatus(created || updated ? `${created} eventos añadidos y ${updated} actualizados en el calendario del dispositivo.` : 'No hay sesiones futuras pendientes para sincronizar.');
+    } catch (error) { setCalendarStatus(error instanceof Error ? error.message : 'No se pudo acceder al calendario del dispositivo.'); }
     finally { setBusy(false); }
   };
-  const weekDays = getCurrentWeekDays();
+
+  const weekLabel = `${weekDays[0].date.toLocaleDateString('es', {day: 'numeric', month: 'short'})} – ${weekDays[6].date.toLocaleDateString('es', {day: 'numeric', month: 'short', year: 'numeric'})}`;
+  const selectedLabel = new Date(`${displayedDate}T00:00:00`).toLocaleDateString('es', {weekday: 'long', day: 'numeric', month: 'long'});
+  const isValidTitle = draft.title.trim().length > 0 && draft.title.trim().length <= 100;
   return (
     <>
-      <Text style={styles.pageTitle}>Tu semana</Text>
-      <Text style={styles.subGreeting}>Organiza tu tiempo de estudio con calma.</Text>
+      <Text style={styles.pageTitle}>Tu calendario</Text>
+      <Text style={styles.subGreeting}>Crea y mueve tus sesiones. Todo se guarda en este dispositivo.</Text>
       <View style={styles.planActionRow}>
-        <Pressable style={styles.planAction} onPress={() => { void prepareReminders(); }} disabled={busy}><Ionicons name="notifications-outline" size={17} color={colors.primary} /><Text style={styles.planActionText}>Recordatorios</Text></Pressable>
-        <Pressable style={styles.planAction} onPress={() => { void exportCalendar(); }} disabled={busy}><Ionicons name="calendar-outline" size={17} color={colors.primary} /><Text style={styles.planActionText}>Añadir al calendario</Text></Pressable>
+        <Pressable style={styles.planAction} onPress={() => openEditor()}><Ionicons name="add-circle-outline" size={18} color={colors.primary} /><Text style={styles.planActionText}>Nuevo evento</Text></Pressable>
+        <Pressable style={styles.planAction} onPress={() => { void prepareReminders(); }} disabled={busy}><Ionicons name="notifications-outline" size={17} color={colors.primary} /><Text style={styles.planActionText}>{busy ? 'Programando…' : 'Activar avisos'}</Text></Pressable>
+        <Pressable style={styles.planAction} onPress={() => { void exportCalendar(); }} disabled={busy}><Ionicons name="calendar-outline" size={17} color={colors.primary} /><Text style={styles.planActionText}>Sincronizar</Text></Pressable>
       </View>
+      {reminderStatus ? <View style={styles.statusBanner}><Ionicons name="notifications-outline" size={16} color={colors.teal} /><Text style={styles.statusText}>{reminderStatus}</Text></View> : null}
+      {calendarStatus ? <View style={styles.statusBanner}><Ionicons name="calendar-outline" size={16} color={colors.teal} /><Text style={styles.statusText}>{calendarStatus}</Text></View> : null}
       <SurfaceCard style={styles.calendarCard}>
+        <View style={styles.weekNavigation}>
+          <Pressable onPress={() => moveWeek(-1)} hitSlop={10} accessibilityLabel="Semana anterior"><Ionicons name="chevron-back" size={20} color={colors.primary} /></Pressable>
+          <Text style={styles.weekRange}>{weekLabel}</Text>
+          <Pressable onPress={() => moveWeek(1)} hitSlop={10} accessibilityLabel="Semana siguiente"><Ionicons name="chevron-forward" size={20} color={colors.primary} /></Pressable>
+        </View>
         <View style={styles.weekDays}>
-          {weekDays.map(day => <View key={day.date.toISOString()} style={styles.dayCell}><Text style={styles.dayName}>{day.label}</Text><View style={[styles.dayNumber, day.isToday && styles.daySelected]}><Text style={[styles.dayNumberText, day.isToday && styles.dayNumberTextSelected]}>{day.date.getDate()}</Text></View></View>)}
+          {weekDays.map(day => {
+            const date = formatLocalDate(day.date);
+            const dayEvents = sessions.filter(session => session.date === date).length;
+            const selected = date === displayedDate;
+            return <Pressable key={date} style={styles.dayCell} onPress={() => { setSelectedDate(date); setHasChosenDate(true); }} accessibilityRole="button" accessibilityState={{selected}}>
+              <Text style={styles.dayName}>{day.label}</Text><View style={[styles.dayNumber, selected && styles.daySelected, !selected && day.isToday && styles.dayToday]}><Text style={[styles.dayNumberText, selected && styles.dayNumberTextSelected]}>{day.date.getDate()}</Text></View>
+              <View style={[styles.dayEventDot, dayEvents > 0 && styles.dayEventDotActive]} />
+            </Pressable>;
+          })}
         </View>
       </SurfaceCard>
-      <SectionHeading title="Sesiones" />
-      {sessions.map((session, index) => {
-        const time = `${String(Math.floor(session.startMinute / 60)).padStart(2, '0')}:${String(session.startMinute % 60).padStart(2, '0')}`;
-        const dateLabel = new Date(`${session.date}T00:00:00`).toLocaleDateString('es', {weekday: 'short', day: 'numeric', month: 'short'});
+      <View style={styles.selectedDayHeader}><View style={{flex: 1}}><Text style={styles.selectedDayTitle}>{selectedLabel}</Text><Text style={styles.cardCaption}>{selectedDaySessions.length} {selectedDaySessions.length === 1 ? 'evento' : 'eventos'} en tu agenda local</Text></View><Pressable style={styles.addDayButton} onPress={() => openEditor()} accessibilityLabel="Crear evento para este día"><Ionicons name="add" size={20} color={colors.surface} /></Pressable></View>
+      {selectedDaySessions.map((session, index) => {
+        const time = formatTime(session.startMinute);
+        const dateLabel = session.source === 'reminder' || !session.materialId ? 'Recordatorio personal' : `${session.durationMinutes} min · ${formatLabels[session.learningFormat]}`;
         const status = session.status === 'completed' ? 'done' : index === 0 ? 'next' : 'planned';
-        return <SessionRow key={session.id} time={time} title={session.title} detail={`${dateLabel} · ${session.durationMinutes} min · ${formatLabels[session.learningFormat]}`} status={status} onPress={() => onOpenLesson(session.materialId, session.topicIndex)} onReschedule={session.status === 'planned' ? () => reschedule(session) : undefined} onComplete={session.status === 'planned' ? () => { void markComplete(session); } : undefined} />;
+        return <SessionRow key={session.id} time={time} title={session.title} detail={dateLabel} status={status} onPress={session.materialId ? () => onOpenLesson(session.materialId, session.topicIndex, session.learningFormat) : undefined} onEdit={() => openEditor(session)} onDelete={() => deleteSession(session)} onComplete={session.status === 'planned' ? () => { void markComplete(session); } : undefined} />;
       })}
-        {!sessions.length ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Ve a Materiales y toca “Crear plan de estudio” en un PDF. Brújula lo analiza sin conexión y guarda las sesiones aquí mismo.</Text></View> : null}
+      {!selectedDaySessions.length ? <View style={styles.infoBox}><Ionicons name={sessions.length ? 'sunny-outline' : 'sparkles-outline'} size={18} color={colors.primary} /><Text style={styles.infoBoxText}>{sessions.length ? 'No tienes nada programado este día. Toca + para agregar una sesión o un recordatorio.' : 'Crea un recordatorio aquí, o importa un PDF y toca “Crear plan de estudio” para organizar sus temas con tus preferencias.'}</Text></View> : null}
+      <View style={styles.localCalendarNote}><Ionicons name="phone-portrait-outline" size={16} color={colors.teal} /><Text style={styles.localCalendarText}>La agenda y los avisos quedan en el teléfono. “Sincronizar” copia las sesiones al calendario del dispositivo; puedes editar o eliminar las de Brújula desde aquí.</Text></View>
+
+      <Modal visible={editor !== undefined} transparent animationType="slide" onRequestClose={() => setEditor(undefined)}>
+        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeading}><View style={{flex: 1}}><Text style={styles.modalTitle}>{editor ? 'Editar evento' : 'Nuevo evento'}</Text><Text style={styles.modalSubtitle}>{selectedLabel}</Text></View><Pressable onPress={() => setEditor(undefined)} hitSlop={10} accessibilityLabel="Cerrar formulario"><Ionicons name="close" size={22} color={colors.muted} /></Pressable></View>
+            <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalContent}>
+              <Text style={styles.formLabel}>¿Qué vas a estudiar?</Text>
+              <TextInput value={draft.title} onChangeText={title => { setFormError(null); setDraft(current => ({...current, title})); }} maxLength={100} placeholder="Ej. Repasar biología celular" placeholderTextColor={colors.muted} style={styles.eventTitleInput} returnKeyType="done" accessibilityLabel="Nombre del evento" />
+              <View style={styles.formLabelRow}><Text style={styles.formLabel}>Hora</Text><Text style={styles.eventTimeValue}>{formatTime(draft.startMinute)}</Text></View>
+              <View style={styles.timeControls}>
+                <Pressable style={styles.timeAdjustButton} onPress={() => { setFormError(null); setDraft(current => ({...current, startMinute: (current.startMinute + 23 * 60 + 45) % (24 * 60)})); }} accessibilityLabel="Restar quince minutos"><Ionicons name="remove" size={20} color={colors.primary} /></Pressable>
+                <Text style={styles.timeHint}>Ajusta en intervalos de 15 min</Text>
+                <Pressable style={styles.timeAdjustButton} onPress={() => { setFormError(null); setDraft(current => ({...current, startMinute: (current.startMinute + 15) % (24 * 60)})); }} accessibilityLabel="Sumar quince minutos"><Ionicons name="add" size={20} color={colors.primary} /></Pressable>
+              </View>
+              <Text style={styles.formLabel}>Duración</Text>
+              <View style={styles.durationChoices}>{[15, 25, 40, 60].map(minutes => <Pressable key={minutes} style={[styles.durationChoice, draft.durationMinutes === minutes && styles.durationChoiceSelected]} onPress={() => setDraft(current => ({...current, durationMinutes: minutes}))}><Text style={[styles.durationChoiceText, draft.durationMinutes === minutes && styles.durationChoiceTextSelected]}>{minutes} min</Text></Pressable>)}</View>
+              <Pressable style={styles.reminderToggle} onPress={() => setDraft(current => ({...current, reminderEnabled: !current.reminderEnabled}))} accessibilityRole="switch" accessibilityState={{checked: draft.reminderEnabled}}><Ionicons name={draft.reminderEnabled ? 'checkbox' : 'square-outline'} size={21} color={draft.reminderEnabled ? colors.teal : colors.muted} /><View style={{flex: 1}}><Text style={styles.formLabel}>Avisarme antes</Text><Text style={styles.cardCaption}>Notificación local del dispositivo</Text></View></Pressable>
+              {draft.reminderEnabled ? <View style={styles.reminderChoices}>{[0, 5, 10, 15, 30].map(minutes => <Pressable key={minutes} style={[styles.durationChoice, draft.reminderMinutesBefore === minutes && styles.durationChoiceSelected]} onPress={() => { setFormError(null); setDraft(current => ({...current, reminderMinutesBefore: minutes})); }}><Text style={[styles.durationChoiceText, draft.reminderMinutesBefore === minutes && styles.durationChoiceTextSelected]}>{minutes === 0 ? 'Al empezar' : `${minutes} min`}</Text></Pressable>)}</View> : null}
+              {formError ? <Text style={styles.formError}>{formError}</Text> : null}
+              <PrimaryButton title={busy ? 'Guardando…' : editor ? 'Guardar cambios' : 'Crear recordatorio'} icon="checkmark" onPress={() => { void saveSession(); }} disabled={!isValidTitle || busy} loading={busy} />
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </>
   );
 }
@@ -448,23 +620,40 @@ function getCurrentWeekSessions(sessions: StudySessionRecord[]) {
   });
 }
 
-function getCurrentWeekDays() {
+function getWeekDays(offset = 0) {
   const today = new Date();
   const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   return Array.from({length: 7}, (_, index) => {
     const date = new Date(monday);
-    date.setDate(monday.getDate() + index);
+    date.setDate(monday.getDate() + index + offset * 7);
     return {date, label: date.toLocaleDateString('es', {weekday: 'short'}).replace('.', ''), isToday: date.toDateString() === today.toDateString()};
   });
 }
 
-export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, onBack}: {ownerId: string; preferences: UserProfile['preferences']; materialId?: string; topicIndex?: number; onBack: () => void}) {
-  const [mode, setMode] = useState<'read' | 'listen' | 'visual'>('read');
+function getWeekOffsetForDate(dateValue: string) {
+  const date = new Date(`${dateValue}T00:00:00`);
+  const today = new Date();
+  const currentMonday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  currentMonday.setDate(currentMonday.getDate() - ((currentMonday.getDay() + 6) % 7));
+  const selectedMonday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  selectedMonday.setDate(selectedMonday.getDate() - ((selectedMonday.getDay() + 6) % 7));
+  return Math.round((selectedMonday.getTime() - currentMonday.getTime()) / (7 * 24 * 60 * 60 * 1000));
+}
+
+function formatTime(startMinute: number) {
+  const normalized = (startMinute + 24 * 60) % (24 * 60);
+  return `${String(Math.floor(normalized / 60)).padStart(2, '0')}:${String(normalized % 60).padStart(2, '0')}`;
+}
+
+export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, learningFormat, onBack}: {ownerId: string; preferences: UserProfile['preferences']; materialId?: string; topicIndex?: number; learningFormat?: LearningFormat; onBack: () => void}) {
+  const preferredFormat = learningFormat ?? preferences.formats[0] ?? 'practice';
+  const [modeOverride, setModeOverride] = useState<{format: LearningFormat; mode: 'read' | 'listen' | 'visual' | 'practice'} | null>(null);
+  const mode = modeOverride?.format === preferredFormat ? modeOverride.mode : lessonModesByFormat[preferredFormat];
+  const setMode = (nextMode: 'read' | 'listen' | 'visual' | 'practice') => setModeOverride({format: preferredFormat, mode: nextMode});
   const [material, setMaterial] = useState<LocalMaterialContent | null>(null);
-  const [showPractice, setShowPractice] = useState(false);
   const [speaking, setSpeaking] = useState(false);
-  const suggested = useMemo(() => formatLabels[preferences.formats[0]] ?? 'Practicar', [preferences.formats]);
+  const suggested = formatLabels[preferredFormat];
   useEffect(() => {
     let active = true;
     if (!materialId) return;
@@ -512,17 +701,14 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
           <LessonMode title="Leer" icon="book-outline" active={mode === 'read'} onPress={() => setMode('read')} />
           <LessonMode title="Escuchar" icon="headset-outline" active={mode === 'listen'} onPress={() => setMode('listen')} />
           <LessonMode title="Esquema" icon="git-network-outline" active={mode === 'visual'} onPress={() => setMode('visual')} />
+          <LessonMode title="Practicar" icon="create-outline" active={mode === 'practice'} onPress={() => setMode('practice')} />
         </View>
         {mode === 'read' ? <LessonSection title={topic?.title ?? 'Resumen del material'} body={topic?.explanation ?? material?.summary ?? 'Abre una sesión desde tu plan para estudiar los temas que organizamos desde tu PDF.'} /> : null}
         {mode === 'read' && material?.summary ? <LessonSection title="Resumen del documento" body={material.summary} /> : null}
         {mode === 'listen' ? <SurfaceCard style={styles.audioCard}><Pressable style={styles.audioCircle} onPress={toggleSpeech} accessibilityLabel={speaking ? 'Detener lectura en voz alta' : 'Escuchar resumen'}><Ionicons name={speaking ? 'stop' : 'play'} size={20} color={colors.surface} /></Pressable><View style={{flex: 1}}><Text style={styles.sectionTitle}>{speaking ? 'Reproduciendo resumen' : 'Escucha el resumen'}</Text><Text style={styles.cardCaption}>{speechText || 'Carga un tema desde tu plan para escucharlo.'}</Text></View><Ionicons name="volume-high-outline" size={20} color={colors.teal} /></SurfaceCard> : null}
         {mode === 'visual' ? <VisualSummary points={keyPoints} /> : null}
+        {mode === 'practice' ? topic?.questions.length ? <View style={styles.practiceList}>{topic.questions.map((question, index) => <PracticeQuestion key={`${index}-${question}`} index={index} question={question} sourceText={topic.explanation} />)}</View> : <View style={styles.infoBox}><Ionicons name="document-text-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Abre un tema de un PDF organizado para practicar con preguntas basadas en ese contenido.</Text></View> : null}
         <SurfaceCard style={styles.sourceCard}><Ionicons name="document-text-outline" size={18} color={colors.muted} /><Text style={styles.sourceText}>{material ? `Organizado desde ${material.originalName}` : 'Contenido de tu sesión'}</Text></SurfaceCard>
-        <PrimaryButton title={showPractice ? 'Ocultar preguntas' : `Practicar ${topic?.questions.length || 5} preguntas`} icon="help-circle-outline" onPress={() => {
-          if (!topic?.questions.length) { Alert.alert('Sin preguntas', 'Vuelve a organizar el PDF para crear preguntas de repaso en este dispositivo.'); return; }
-          setShowPractice(value => !value);
-        }} />
-        {showPractice ? topic?.questions.map((question, index) => <LessonSection key={`${index}-${question}`} title={`Pregunta ${index + 1}`} body={question} />) : null}
       </ScrollView>
     </AppPage>
   );
@@ -536,6 +722,18 @@ function LessonSection({title, body}: {title: string; body: string}) {
   return <SurfaceCard style={styles.lessonSection}><Text style={styles.lessonSectionTitle}>{title}</Text><Text style={styles.lessonBody}>{body}</Text></SurfaceCard>;
 }
 
+function PracticeQuestion({index, question, sourceText}: {index: number; question: string; sourceText: string}) {
+  const [answer, setAnswer] = useState('');
+  const [showSource, setShowSource] = useState(false);
+  return <SurfaceCard style={styles.practiceCard}>
+    <Text style={styles.practiceLabel}>PREGUNTA {index + 1}</Text>
+    <Text style={styles.lessonSectionTitle}>{question}</Text>
+    <TextInput value={answer} onChangeText={setAnswer} placeholder="Escribe tu respuesta con tus palabras" placeholderTextColor={colors.muted} multiline textAlignVertical="top" style={styles.practiceInput} accessibilityLabel={`Tu respuesta a la pregunta ${index + 1}`} />
+    <Pressable style={styles.revealSourceButton} onPress={() => setShowSource(value => !value)}><Ionicons name={showSource ? 'eye-off-outline' : 'eye-outline'} size={16} color={colors.primary} /><Text style={styles.revealSourceText}>{showSource ? 'Ocultar referencia' : 'Comparar con el material'}</Text></Pressable>
+    {showSource ? <Text style={styles.lessonBody}>{sourceText}</Text> : null}
+  </SurfaceCard>;
+}
+
 function VisualSummary({points}: {points: string[]}) {
   return (
     <SurfaceCard style={styles.visualCard}>
@@ -545,16 +743,18 @@ function VisualSummary({points}: {points: string[]}) {
   );
 }
 
-function SessionRow({time, title, detail, status, onPress, onReschedule, onComplete}: {time: string; title: string; detail: string; status: 'done' | 'next' | 'planned'; onPress: () => void; onReschedule?: () => void; onComplete?: () => void}) {
+function SessionRow({time, title, detail, status, onPress, onEdit, onDelete, onComplete}: {time: string; title: string; detail: string; status: 'done' | 'next' | 'planned'; onPress?: () => void; onEdit?: () => void; onDelete?: () => void; onComplete?: () => void}) {
   const accent = status === 'done' ? colors.teal : status === 'next' ? colors.amber : colors.primary;
   return (
-    <Pressable onPress={onPress} style={[styles.sessionRow, status === 'next' && styles.sessionRowNext]}>
+    <View style={[styles.sessionRow, status === 'next' && styles.sessionRowNext]}>
       <Text style={styles.sessionTime}>{time}</Text>
       <View style={[styles.sessionAccent, {backgroundColor: accent}]} />
-      <View style={styles.sessionCopy}><Text style={styles.materialName}>{title}</Text><Text style={styles.materialMeta}>{detail}</Text></View>
+      <Pressable onPress={onPress} disabled={!onPress} style={styles.sessionCopy} accessibilityRole={onPress ? 'button' : undefined}><Text style={styles.materialName}>{title}</Text><Text style={styles.materialMeta}>{detail}</Text></Pressable>
       {onComplete ? <Pressable onPress={onComplete} hitSlop={12} style={styles.rescheduleButton} accessibilityLabel="Completar sesión"><Ionicons name="checkmark-outline" size={19} color={colors.teal} /></Pressable> : null}
-      {onReschedule ? <Pressable onPress={onReschedule} hitSlop={12} style={styles.rescheduleButton} accessibilityLabel="Reprogramar sesión"><Ionicons name="refresh-outline" size={19} color={colors.primary} /></Pressable> : <Ionicons name={status === 'done' ? 'checkmark-circle' : 'chevron-forward'} size={19} color={status === 'done' ? colors.teal : colors.muted} />}
-    </Pressable>
+      {onEdit ? <Pressable onPress={onEdit} hitSlop={10} style={styles.rescheduleButton} accessibilityLabel="Editar evento"><Ionicons name="create-outline" size={18} color={colors.primary} /></Pressable> : null}
+      {onDelete ? <Pressable onPress={onDelete} hitSlop={10} style={styles.sessionDeleteButton} accessibilityLabel="Eliminar evento"><Ionicons name="trash-outline" size={16} color={colors.muted} /></Pressable> : null}
+      {!onEdit && !onDelete ? <Ionicons name={status === 'done' ? 'checkmark-circle' : onPress ? 'chevron-forward' : 'ellipse-outline'} size={19} color={status === 'done' ? colors.teal : colors.muted} /> : null}
+    </View>
   );
 }
 
@@ -611,11 +811,18 @@ const styles = StyleSheet.create({
   voiceNotesHeading: {flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 13},
   voiceNoteRow: {flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.border},
   voiceNoteIcon: {width: 34, height: 34, borderRadius: 11, backgroundColor: colors.tealSoft, alignItems: 'center', justifyContent: 'center'},
-  planActionRow: {flexDirection: 'row', gap: 9, marginBottom: 14},
-  planAction: {flex: 1, minHeight: 42, paddingHorizontal: 9, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6},
-  planActionText: {fontSize: 11, color: colors.primary, fontWeight: '700'},
-  materialCard: {flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, padding: 13, borderRadius: radius.md},
-  materialActions: {flexDirection: 'row', alignItems: 'center', gap: 10},
+  planActionRow: {flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 14},
+  planAction: {flexGrow: 1, flexBasis: '31%', minHeight: 42, paddingHorizontal: 6, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 5},
+  planActionText: {fontSize: 10, color: colors.primary, fontWeight: '700'},
+  materialCard: {gap: 9, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, padding: 13, borderRadius: radius.md},
+  materialCardMain: {flexDirection: 'row', alignItems: 'center', gap: 11},
+  materialOpen: {flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 11},
+  deleteMaterialButton: {width: 34, height: 34, alignItems: 'center', justifyContent: 'center'},
+  analysisPreview: {borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10},
+  analysisSummary: {fontSize: 12, color: colors.muted, lineHeight: 18},
+  analysisTopicsTitle: {fontSize: 11, fontWeight: '700', color: colors.text, marginTop: 9, marginBottom: 3},
+  analysisTopic: {minHeight: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, borderTopWidth: 1, borderTopColor: colors.border},
+  analysisTopicText: {flex: 1, fontSize: 12, color: colors.primary, fontWeight: '600'},
   materialInfo: {flex: 1},
   progressTrackSmall: {height: 5, backgroundColor: '#E7EAF0', borderRadius: 3, overflow: 'hidden', marginTop: 7},
   progressFillSmall: {height: 5, borderRadius: 3, backgroundColor: colors.teal},
@@ -623,20 +830,54 @@ const styles = StyleSheet.create({
   infoBoxText: {flex: 1, fontSize: 12, lineHeight: 18, color: colors.muted},
   createPlanButton: {alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 9, paddingVertical: 6, paddingHorizontal: 9, borderRadius: radius.pill, backgroundColor: '#EEEFFE'},
   createPlanButtonText: {fontSize: 11, color: colors.primary, fontWeight: '700'},
-  calendarCard: {paddingHorizontal: 7, paddingVertical: 15, marginBottom: 23},
+  calendarCard: {paddingHorizontal: 8, paddingVertical: 13, marginBottom: 18},
+  weekNavigation: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 10, marginBottom: 12},
+  weekRange: {fontSize: 13, color: colors.text, fontWeight: '700'},
   weekDays: {flexDirection: 'row', justifyContent: 'space-around'},
-  dayCell: {alignItems: 'center', gap: 9},
+  dayCell: {alignItems: 'center', gap: 6, minWidth: 34, paddingVertical: 2},
   dayName: {fontSize: 11, color: colors.muted},
   dayNumber: {width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center'},
   daySelected: {backgroundColor: colors.primary},
+  dayToday: {borderWidth: 1, borderColor: colors.primary},
   dayNumberText: {fontSize: 12, color: colors.text, fontWeight: '600'},
   dayNumberTextSelected: {color: colors.surface},
+  dayEventDot: {width: 5, height: 5, borderRadius: 3, backgroundColor: 'transparent'},
+  dayEventDotActive: {backgroundColor: colors.teal},
+  selectedDayHeader: {flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12},
+  selectedDayTitle: {fontSize: 16, color: colors.text, fontWeight: '700', textTransform: 'capitalize'},
+  addDayButton: {width: 38, height: 38, borderRadius: 12, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center'},
+  statusBanner: {flexDirection: 'row', alignItems: 'flex-start', gap: 8, backgroundColor: colors.tealSoft, padding: 11, borderRadius: radius.sm, marginBottom: 9},
+  statusText: {flex: 1, fontSize: 12, color: colors.teal, lineHeight: 17, fontWeight: '600'},
+  localCalendarNote: {flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginTop: 4, marginBottom: 10},
+  localCalendarText: {flex: 1, fontSize: 11, color: colors.muted, lineHeight: 16},
   sessionRow: {minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: 11, marginBottom: 10},
   sessionRowNext: {backgroundColor: '#FFFCF5', borderColor: '#F5D38D'},
   sessionTime: {width: 43, fontSize: 11, color: colors.muted, fontWeight: '600'},
   sessionAccent: {width: 4, height: 42, borderRadius: 2},
   sessionCopy: {flex: 1},
   rescheduleButton: {width: 34, height: 34, borderRadius: 11, backgroundColor: '#F0F1FF', alignItems: 'center', justifyContent: 'center'},
+  sessionDeleteButton: {width: 28, height: 34, alignItems: 'center', justifyContent: 'center'},
+  modalBackdrop: {flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(15, 23, 42, 0.42)'},
+  modalSheet: {width: '100%', maxWidth: 520, maxHeight: '92%', alignSelf: 'center', backgroundColor: colors.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 19, paddingHorizontal: 20, paddingBottom: 26},
+  modalHeading: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 13, borderBottomWidth: 1, borderBottomColor: colors.border},
+  modalTitle: {fontSize: 21, color: colors.text, fontWeight: '800'},
+  modalSubtitle: {fontSize: 13, color: colors.muted, marginTop: 3, textTransform: 'capitalize'},
+  modalContent: {paddingTop: 16, paddingBottom: 12},
+  formLabel: {fontSize: 13, color: colors.text, fontWeight: '700', marginBottom: 8},
+  eventTitleInput: {minHeight: 50, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, borderRadius: radius.sm, paddingHorizontal: 13, fontSize: 16, color: colors.text, marginBottom: 18},
+  formLabelRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
+  eventTimeValue: {fontSize: 22, color: colors.primary, fontWeight: '800'},
+  timeControls: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16},
+  timeAdjustButton: {width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: '#EEEFFE'},
+  timeHint: {fontSize: 11, color: colors.muted},
+  durationChoices: {flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 16},
+  durationChoice: {minHeight: 36, paddingHorizontal: 12, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center'},
+  durationChoiceSelected: {borderColor: colors.teal, backgroundColor: colors.tealSoft},
+  durationChoiceText: {fontSize: 12, color: colors.muted, fontWeight: '600'},
+  durationChoiceTextSelected: {color: colors.teal},
+  reminderToggle: {flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 9, borderTopWidth: 1, borderTopColor: colors.border},
+  reminderChoices: {flexDirection: 'row', flexWrap: 'wrap', gap: 7, paddingBottom: 16},
+  formError: {fontSize: 12, lineHeight: 17, color: colors.danger, fontWeight: '600', marginBottom: 12},
   statGrid: {flexDirection: 'row', gap: 11, marginTop: 4, marginBottom: 15},
   statCard: {flex: 1, minHeight: 132},
   statIcon: {width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 10},
@@ -653,14 +894,20 @@ const styles = StyleSheet.create({
   lessonTitle: {fontSize: 22, color: colors.text, fontWeight: '800'},
   suggestedBanner: {flexDirection: 'row', alignItems: 'center', gap: 7, padding: 10, borderRadius: radius.sm, backgroundColor: '#F0F1FF', marginBottom: 16},
   suggestedText: {fontSize: 12, color: colors.primary, fontWeight: '700'},
-  lessonModes: {flexDirection: 'row', gap: 7, marginBottom: 14},
-  lessonMode: {flex: 1, height: 42, borderRadius: radius.sm, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5},
+  lessonModes: {flexDirection: 'row', gap: 5, marginBottom: 14},
+  lessonMode: {flex: 1, minWidth: 0, height: 42, paddingHorizontal: 3, borderRadius: radius.sm, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4},
   lessonModeActive: {borderColor: colors.primary, backgroundColor: '#F0F1FF'},
-  lessonModeText: {fontSize: 11, color: colors.muted, fontWeight: '600'},
+  lessonModeText: {fontSize: 10, color: colors.muted, fontWeight: '600'},
   lessonModeTextActive: {color: colors.primary},
   lessonSection: {marginBottom: 11},
   lessonSectionTitle: {fontSize: 16, color: colors.text, fontWeight: '700', marginBottom: 7},
   lessonBody: {fontSize: 14, lineHeight: 22, color: colors.muted},
+  practiceList: {gap: 10},
+  practiceCard: {marginBottom: 3},
+  practiceLabel: {fontSize: 10, letterSpacing: 0.7, fontWeight: '800', color: colors.primary, marginBottom: 7},
+  practiceInput: {minHeight: 84, maxHeight: 160, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, padding: 11, color: colors.text, backgroundColor: colors.background, fontSize: 14, lineHeight: 20, marginTop: 10},
+  revealSourceButton: {flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', paddingVertical: 10},
+  revealSourceText: {fontSize: 12, color: colors.primary, fontWeight: '700'},
   audioCard: {flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 14},
   audioCircle: {width: 42, height: 42, borderRadius: 21, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center'},
   visualCard: {marginBottom: 14},
