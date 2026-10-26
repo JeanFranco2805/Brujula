@@ -14,7 +14,7 @@ import {
 import {Ionicons} from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import {RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder, useAudioRecorderState} from 'expo-audio';
-import {extractText, isAvailable as isPdfTextExtractionAvailable} from 'expo-pdf-text-extract';
+import {extractTextWithInfo, isAvailable as isPdfTextExtractionAvailable} from 'expo-pdf-text-extract';
 import * as Speech from 'expo-speech';
 import {cancelStudyReminder, exportSessionsToDeviceCalendar, removeSessionFromDeviceCalendar, scheduleStudyReminder, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
 import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, openLocalPdf, saveLocalPdfAnalysis, type LocalPdf} from '../services/local-pdfs';
@@ -80,15 +80,25 @@ export function MainApp({
     }
     setGeneratingPlanFor(file.id);
     try {
-      const text = await extractText(file.uri);
-      const analysis = analyzeLocalStudyText(text);
+      const extraction = await extractTextWithInfo(file.uri);
+      if (!extraction.success) {
+        const reason = extraction.passwordRequired
+          ? 'Este PDF está protegido con contraseña. Desbloquéalo en tu dispositivo e impórtalo de nuevo.'
+          : extraction.error || 'No se pudo extraer el texto del PDF.';
+        throw new Error(reason);
+      }
+      const analysis = analyzeLocalStudyText(extraction.text, new Date(), extraction.pageCount);
       const savedFile = await saveLocalPdfAnalysis(account.id, file.id, analysis);
       const generated = generateLocalStudyPlan(file.id, analysis.topics, account.preferences);
       const nextSessions = await replaceLocalMaterialSessions(account.id, file.id, generated);
       setMaterials(previous => [...previous.filter(material => material.id !== file.id), toLocalMaterial(savedFile)]);
       setSessions(nextSessions);
       await syncEnabledStudyTools(account.id, nextSessions).catch(() => undefined);
-      Alert.alert('Tu plan está listo', `Organizamos ${analysis.topics.length} temas y ${generated.length} sesiones según tus preferencias. El PDF, los temas y el plan permanecen en este dispositivo.`, [
+      const extractedWords = analysis.extractedWords?.toLocaleString('es-CO');
+      const pages = analysis.pageCount ? ' en ' + analysis.pageCount + ' páginas' : '';
+      const warning = analysis.warnings?.length ? '\n\n' + analysis.warnings.join('\n') : '';
+      const details = extractedWords ? 'Leímos ' + extractedWords + ' palabras' + pages + ' y organizamos ' : 'Organizamos ';
+      Alert.alert('Tu plan está listo', details + analysis.topics.length + ' temas en ' + generated.length + ' sesiones según tus preferencias.' + warning + '\n\nEl PDF, los temas y el plan permanecen en este dispositivo.', [
         {text: 'Ver mi plan', onPress: onOpenPlan},
         {text: 'Seguir aquí', style: 'cancel'},
       ]);
@@ -239,7 +249,13 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
             ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? 'Analizando el contenido local…' : material.topics ? `${material.topics} temas · Actualizar plan` : 'Crear plan de estudio desde este PDF'}</Text></Pressable>
             {material.localFile.analysis ? <View style={styles.analysisPreview}>
               <Text style={styles.analysisSummary} numberOfLines={3}>{material.localFile.analysis.summary}</Text>
-              <Text style={styles.analysisTopicsTitle}>Temas organizados · toca uno para estudiar</Text>
+              <Text style={styles.analysisTopicsTitle}>
+                Temas organizados
+                {material.localFile.analysis.extractedWords ? ' · ' + material.localFile.analysis.extractedWords.toLocaleString('es-CO') + ' palabras' : ''}
+                {material.localFile.analysis.pageCount ? ' · ' + material.localFile.analysis.pageCount + ' páginas' : ''}
+                {' · toca uno para estudiar'}
+              </Text>
+              {material.localFile.analysis.warnings?.map((warning, warningIndex) => <Text key={'analysis-warning-' + warningIndex} style={styles.analysisWarning}>{warning}</Text>)}
               {material.localFile.analysis.topics.map((topic, topicIndex) => <Pressable key={`${material.id}-${topicIndex}`} style={styles.analysisTopic} onPress={() => onOpenLesson(material.id, topicIndex, preferences.formats[topicIndex % preferences.formats.length] ?? 'practice')}>
                 <Text style={styles.analysisTopicText} numberOfLines={1}>{topic.title}</Text><Ionicons name="chevron-forward" size={16} color={colors.primary} />
               </Pressable>)}
@@ -821,6 +837,7 @@ const styles = StyleSheet.create({
   analysisPreview: {borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10},
   analysisSummary: {fontSize: 12, color: colors.muted, lineHeight: 18},
   analysisTopicsTitle: {fontSize: 11, fontWeight: '700', color: colors.text, marginTop: 9, marginBottom: 3},
+  analysisWarning: {fontSize: 11, color: colors.danger, lineHeight: 16, marginTop: 5},
   analysisTopic: {minHeight: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, borderTopWidth: 1, borderTopColor: colors.border},
   analysisTopicText: {flex: 1, fontSize: 12, color: colors.primary, fontWeight: '600'},
   materialInfo: {flex: 1},
