@@ -25,7 +25,7 @@
       [
         "expo-calendar",
         {
-            "calendarPermission": "Brújula necesita administrar las sesiones que agregues al calendario de tu dispositivo."
+          "calendarPermission": "Brújula necesita administrar las sesiones que agregues al calendario de tu dispositivo."
         }
       ],
       [
@@ -39,11 +39,22 @@
         "expo-build-properties",
         {
           "android": {
-            "usesCleartextTraffic": true
+            "usesCleartextTraffic": true,
+            "buildArchs": [
+              "arm64-v8a"
+            ]
           }
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "llama.rn",
+        {
+          "enableOpenCLAndHexagon": false
+        }
+      ],
+      "expo-font",
+      "expo-asset"
     ],
     "ios": {
       "supportsTablet": true
