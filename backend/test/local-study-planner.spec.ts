@@ -39,6 +39,7 @@ describe('local study planner', () => {
     const result = analyzeLocalStudyText(`Pági-\nna 1 de 4\n${text}`);
 
     expect(result.topics.length).toBeGreaterThan(0);
+    expect(result.topics[0].title).toBe('La mitocondria');
     expect(result.topics[0].explanation).toContain('membrana');
     expect(result.summary.length).toBeLessThanOrEqual(900);
   });
@@ -46,6 +47,47 @@ describe('local study planner', () => {
   it('reports scanned or empty PDFs instead of creating a fake plan', () => {
     expect(() => analyzeLocalStudyText('')).toThrow(LocalPdfAnalysisError);
     expect(() => analyzeLocalStudyText('x'.repeat(120))).toThrow('texto seleccionable');
+  });
+
+  it('preserves sections after the first twenty topics and reports how much text was extracted', () => {
+    const text = Array.from({length: 24}, (_, index) => [
+      'TEMA ' + (index + 1) + ': Contenido ' + (index + 1),
+      'El contenido del tema ' + (index + 1) + ' explica conceptos importantes con suficiente contexto para estudiar.',
+      'La última palabra distintiva de esta sección es MARCADOR_' + (index + 1) + '.',
+    ].join('\n')).join('\n');
+
+    const analysis = analyzeLocalStudyText(text, new Date('2026-10-26T12:00:00.000Z'), 24);
+
+    expect(analysis.topics).toHaveLength(24);
+    expect(analysis.topics.at(-1)?.explanation).toContain('MARCADOR_24');
+    expect(analysis.extractedWords).toBeGreaterThan(100);
+    expect(analysis.extractedCharacters).toBeGreaterThan(text.length - 20);
+    expect(analysis.pageCount).toBe(24);
+  });
+
+  it('keeps content past the former sentence and 1500-character limits, including text without punctuation', () => {
+    const longText = Array.from({length: 240}, (_, index) => 'fragmento' + index).join(' ') + ' CIERRE_DEL_DOCUMENTO';
+    const analysis = analyzeLocalStudyText(longText);
+    const extracted = analysis.topics.map(topic => topic.explanation).join(' ');
+
+    expect(analysis.topics.length).toBeGreaterThan(1);
+    expect(extracted).toContain('fragmento239');
+    expect(extracted).toContain('CIERRE_DEL_DOCUMENTO');
+    expect(analysis.extractedCharacters).toBe(longText.length);
+  });
+
+  it('uses title-case standalone section headings and warns when pages yield very little text', () => {
+    const text = [
+      'La Célula',
+      'La célula es la unidad estructural y funcional de los seres vivos. Contiene material genético y una membrana.',
+      'La Fotosíntesis',
+      'La fotosíntesis transforma energía luminosa en energía química. Las plantas realizan este proceso en sus hojas.',
+    ].join('\n');
+
+    const analysis = analyzeLocalStudyText(text, new Date('2026-10-26T12:00:00.000Z'), 40);
+
+    expect(analysis.topics.map(topic => topic.title)).toEqual(['La Célula', 'La Fotosíntesis']);
+    expect(analysis.warnings?.[0]).toContain('poco texto seleccionable');
   });
 
   it('builds spaced sessions using the learner format and duration preferences on weekdays', () => {
