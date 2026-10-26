@@ -85,9 +85,11 @@ Si la API no responde, el registro y el login por correo usan el modo local del 
 
 ### Importar un PDF y crear un plan
 
-Importar un PDF desde **Materiales** lo copia al almacenamiento privado del teléfono. Al tocar **Crear plan de estudio**, `expo-pdf-text-extract` usa PDFKit en iOS y PDFBox en Android para extraer el texto directamente en el dispositivo. Brújula organiza ese texto en temas y preguntas de repaso, genera sesiones según los formatos, el ritmo y la duración elegidos, y guarda el análisis y el plan localmente. No se envían el PDF, el texto ni las sesiones a la API; no hay que conectar la cuenta ni volver a escribir la contraseña.
+Importar un PDF desde **Materiales** lo copia al almacenamiento privado del teléfono. Al tocar **Crear plan con IA local**, `expo-pdf-text-extract` usa PDFKit en iOS y PDFBox en Android para leer su texto; `llama.rn` ejecuta el modelo Qwen3 1.7B dentro del dispositivo. La IA organiza los temas, redacta explicaciones y preguntas, prepara guiones para escuchar y esquemas visuales, y adjunta una cita del PDF a cada tema. La app descarta respuestas cuya cita no coincide con el documento. Después crea sesiones según el objetivo, los formatos, el ritmo y los minutos configurados.
 
-Esta organización local usa reglas de texto, no un modelo generativo. Funciona con PDFs que tengan texto seleccionable. Un documento escaneado que solo contiene imágenes requiere OCR local, todavía no incluido. El material y las sesiones quedan disponibles sin conexión.
+La primera descarga instala el modelo GGUF Q4_K_M (1.282.439.264 bytes, alrededor de 1,28 GB) en el almacenamiento privado de la app y requiere cerca de 1,4 GB libres. La descarga requiere internet; una vez instalado, la lectura y generación de planes funcionan sin conexión. Solo se descarga el modelo: el PDF, su texto, las respuestas y las sesiones no se envían a Koombea, a la API ni a un servicio de inferencia. El plan se crea desde Materiales sin pedir la contraseña de la cuenta.
+
+La build nativa es obligatoria para usar el motor local; Expo Go no incluye `llama.rn`. Funciona con PDFs que tengan texto seleccionable. Un documento escaneado que solo contiene imágenes requiere OCR local, todavía no incluido. El modelo GGUF se publica en [ggml-org/Qwen3-1.7B-GGUF](https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF) bajo Apache-2.0 y se basa en [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B), también Apache-2.0.
 
 ### IA y apuntes de voz
 
@@ -111,6 +113,6 @@ La pantalla incluye el flujo OAuth de Google. Para activarlo, configura los Clie
 
 ## Pruebas
 
-Desde `backend/`, ejecuta `npm test` para las pruebas de servicios y rutas HTTP con dobles de base de datos/proveedores, `npm run test:coverage` para cobertura y `npm run build` para compilar. Para una prueba con PostgreSQL real, levanta Docker, aplica `npm run db:migrate` y usa la app con `EXPO_PUBLIC_API_URL` apuntando al servidor.
+Desde `backend/`, ejecuta `npm test` para las pruebas de servicios y rutas HTTP, incluida la generación local de prompts, validación de citas y gestión/descarga del modelo simulada, `npm run test:coverage` para cobertura y `npm run build` para compilar. Para una prueba con PostgreSQL real, levanta Docker, aplica `npm run db:migrate` y usa la app con `EXPO_PUBLIC_API_URL` apuntando al servidor.
 
 La integración real requiere configurar PostgreSQL, la clave OpenAI para transcripción, y los Client IDs de Google para OAuth de inicio de sesión. Recuperación/verificación de correo, renovación de tokens, OCR de PDFs escaneados y OAuth de Google Calendar no están implementados todavía.
