@@ -18,7 +18,9 @@ import {extractTextWithInfo, isAvailable as isPdfTextExtractionAvailable} from '
 import * as Speech from 'expo-speech';
 import {cancelStudyReminder, exportSessionsToDeviceCalendar, removeSessionFromDeviceCalendar, scheduleStudyReminder, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
 import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, openLocalPdf, saveLocalPdfAnalysis, type LocalPdf} from '../services/local-pdfs';
-import {analyzeLocalStudyText, formatLocalDate, generateLocalStudyPlan, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
+import {formatLocalDate, generateLocalStudyPlan, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
+import {cancelLocalAIModelDownload, ensureLocalAIModelInstalled, generateLocalAIAnalysis, isLocalAIModelInstalled, removeLocalAIModel} from '../services/local-ai-device';
+import {LOCAL_AI_MODEL, type ModelDownloadProgress} from '../services/local-ai-model-manager';
 import {loadLocalStudyPlan, removeLocalMaterialSessions, replaceLocalMaterialSessions, saveLocalStudyPlan} from '../services/local-study-plan-store';
 import {deleteLocalVoiceNote, loadLocalVoiceNotes, saveLocalVoiceNote, type LocalVoiceNote} from '../services/local-voice-notes';
 import {AppPage, Brand, Pill, PrimaryButton, SectionHeading, SurfaceCard} from '../components/ui';
@@ -29,6 +31,7 @@ export type TabKey = 'home' | 'materials' | 'plan' | 'progress';
 type Material = {id: string; name: string; topics: number; summary?: string; localFile: LocalPdf};
 type StudySessionRecord = DeviceStudySession & LocalStudySession;
 type LocalMaterialContent = {id: string; originalName: string; summary: string; keyPoints: string[]; topics: StudyTopic[]};
+type AIModelStatus = 'checking' | 'missing' | 'downloading' | 'ready';
 
 const formatLabels: Record<LearningFormat, string> = {
   read: 'Leer',
@@ -58,6 +61,9 @@ export function MainApp({
   const [materials, setMaterials] = useState<Material[]>([]);
   const [sessions, setSessions] = useState<StudySessionRecord[]>([]);
   const [generatingPlanFor, setGeneratingPlanFor] = useState<string | null>(null);
+  const [aiModelStatus, setAIModelStatus] = useState<AIModelStatus>('checking');
+  const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
+  const [planProgress, setPlanProgress] = useState('');
   const firstName = account.name.trim().split(/\s+/)[0] || 'Estudiante';
 
   useEffect(() => {
@@ -72,7 +78,15 @@ export function MainApp({
     return () => { active = false; };
   }, [account.id]);
 
-  const generatePlanFromPdf = async (file: LocalPdf) => {
+  useEffect(() => {
+    let active = true;
+    isLocalAIModelInstalled()
+      .then(installed => { if (active) setAIModelStatus(installed ? 'ready' : 'missing'); })
+      .catch(() => { if (active) setAIModelStatus('missing'); });
+    return () => { active = false; };
+  }, []);
+
+  const generatePlanFromPdf = async (file: LocalPdf, downloadModelFirst = false) => {
     if (generatingPlanFor) return;
     if (!isPdfTextExtractionAvailable()) {
       Alert.alert('Actualiza Brújula', 'El análisis local del PDF requiere la versión instalada de Brújula; no funciona desde Expo Go.');
@@ -80,6 +94,18 @@ export function MainApp({
     }
     setGeneratingPlanFor(file.id);
     try {
+      let modelInstalled = await isLocalAIModelInstalled();
+      if (!modelInstalled && downloadModelFirst) {
+        setAIModelStatus('downloading');
+        setModelDownloadProgress({bytesWritten: 0, totalBytes: LOCAL_AI_MODEL.sizeBytes, percent: 0});
+        await ensureLocalAIModelInstalled(setModelDownloadProgress);
+        modelInstalled = true;
+        setAIModelStatus('ready');
+        setModelDownloadProgress(null);
+      }
+      if (!modelInstalled) throw new Error('La IA local todavía no está instalada. Descarga el modelo desde Materiales e inténtalo otra vez.');
+
+      setPlanProgress('Extrayendo el texto del PDF en este teléfono…');
       const extraction = await extractTextWithInfo(file.uri);
       if (!extraction.success) {
         const reason = extraction.passwordRequired
@@ -87,7 +113,11 @@ export function MainApp({
           : extraction.error || 'No se pudo extraer el texto del PDF.';
         throw new Error(reason);
       }
-      const analysis = analyzeLocalStudyText(extraction.text, new Date(), extraction.pageCount);
+      setPlanProgress('Preparando el modelo de IA local…');
+      const analysis = await generateLocalAIAnalysis(extraction.text, account.preferences, extraction.pageCount, progress => {
+        if (progress.stage === 'loading-model') setPlanProgress(`Cargando la IA local… ${progress.percent}%`);
+        else setPlanProgress(`La IA local está organizando el contenido… ${progress.completedChunks} de ${progress.totalChunks} partes`);
+      });
       const savedFile = await saveLocalPdfAnalysis(account.id, file.id, analysis);
       const generated = generateLocalStudyPlan(file.id, analysis.topics, account.preferences);
       const nextSessions = await replaceLocalMaterialSessions(account.id, file.id, generated);
@@ -95,21 +125,86 @@ export function MainApp({
       setSessions(nextSessions);
       await syncEnabledStudyTools(account.id, nextSessions).catch(() => undefined);
       const extractedWords = analysis.extractedWords?.toLocaleString('es-CO');
-      const pages = analysis.pageCount ? ' en ' + analysis.pageCount + ' páginas' : '';
+      const pages = analysis.pageCount ? ' de ' + analysis.pageCount + ' páginas' : '';
       const warning = analysis.warnings?.length ? '\n\n' + analysis.warnings.join('\n') : '';
-      const details = extractedWords ? 'Leímos ' + extractedWords + ' palabras' + pages + ' y organizamos ' : 'Organizamos ';
-      Alert.alert('Tu plan está listo', details + analysis.topics.length + ' temas en ' + generated.length + ' sesiones según tus preferencias.' + warning + '\n\nEl PDF, los temas y el plan permanecen en este dispositivo.', [
+      const details = extractedWords ? `Analizó ${extractedWords} palabras${pages} y generó ` : 'Generó ';
+      Alert.alert('Tu plan está listo', `${details}${analysis.topics.length} temas en ${generated.length} sesiones según tus preferencias. Modelo: ${analysis.modelName ?? 'IA local'}.${warning}\n\nEl PDF, los temas y el plan permanecen en este dispositivo.`, [
         {text: 'Ver mi plan', onPress: onOpenPlan},
         {text: 'Seguir aquí', style: 'cancel'},
       ]);
     } catch (error) {
+      if (downloadModelFirst) {
+        void isLocalAIModelInstalled()
+          .then(installed => setAIModelStatus(installed ? 'ready' : 'missing'))
+          .catch(() => setAIModelStatus('missing'));
+      }
+      setModelDownloadProgress(null);
       Alert.alert('No se pudo crear el plan', error instanceof Error ? error.message : 'Comprueba que el PDF contenga texto seleccionable.');
     } finally {
       setGeneratingPlanFor(null);
+      setPlanProgress('');
     }
   };
 
-  const requestPlanForPdf = (file: LocalPdf) => { void generatePlanFromPdf(file); };
+  const requestPlanForPdf = (file: LocalPdf) => {
+    if (generatingPlanFor || aiModelStatus === 'downloading') return;
+    void isLocalAIModelInstalled().then(installed => {
+      setAIModelStatus(installed ? 'ready' : 'missing');
+      if (installed) {
+        void generatePlanFromPdf(file);
+        return;
+      }
+      Alert.alert(
+        'Descargar IA local',
+        `La primera descarga ocupa aproximadamente ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)} y requiere cerca de 1,4 GB libres. El modelo se queda en el teléfono; el PDF no se envía a ningún servidor.`,
+        [
+          {text: 'Ahora no', style: 'cancel'},
+          {text: 'Descargar y crear plan', onPress: () => { void generatePlanFromPdf(file, true); }},
+        ],
+      );
+    }).catch(error => Alert.alert('No se pudo revisar la IA local', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
+  };
+
+  const requestModelDownload = () => {
+    if (aiModelStatus === 'downloading' || aiModelStatus === 'ready') return;
+    Alert.alert(
+      'Instalar IA local',
+      `Descargará ${LOCAL_AI_MODEL.name} (aprox. ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)}) al almacenamiento privado del teléfono. Necesitas cerca de 1,4 GB libres. Tus PDFs nunca se cargan.`,
+      [
+        {text: 'Cancelar', style: 'cancel'},
+        {text: 'Descargar modelo', onPress: () => {
+          setAIModelStatus('downloading');
+          setModelDownloadProgress({bytesWritten: 0, totalBytes: LOCAL_AI_MODEL.sizeBytes, percent: 0});
+          void ensureLocalAIModelInstalled(setModelDownloadProgress)
+            .then(() => { setAIModelStatus('ready'); setModelDownloadProgress(null); })
+            .catch(error => {
+              setAIModelStatus('missing');
+              setModelDownloadProgress(null);
+              Alert.alert('No se pudo instalar la IA local', error instanceof Error ? error.message : 'Comprueba tu conexión e inténtalo otra vez.');
+            });
+        }},
+      ],
+    );
+  };
+
+  const requestModelRemoval = () => Alert.alert(
+    'Eliminar modelo local',
+    `Se liberarán aproximadamente ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)}. Los PDFs, los temas y tu plan no se borrarán.`,
+    [
+      {text: 'Conservar', style: 'cancel'},
+      {text: 'Eliminar modelo', style: 'destructive', onPress: () => {
+        if (generatingPlanFor) return;
+        try {
+          removeLocalAIModel();
+          setAIModelStatus('missing');
+        } catch (error) {
+          Alert.alert('No se pudo eliminar', error instanceof Error ? error.message : 'Inténtalo otra vez.');
+        }
+      }},
+    ],
+  );
+
+  const stopModelDownload = () => cancelLocalAIModelDownload();
 
   return (
     <AppPage edges={['top', 'right', 'left']}>
@@ -127,7 +222,7 @@ export function MainApp({
 
       <ScrollView contentContainerStyle={styles.mainContent} showsVerticalScrollIndicator={false}>
         {activeTab === 'home' ? <HomeTab firstName={firstName} account={account} materials={materials} sessions={sessions} onContinue={onOpenLesson} onOpenMaterials={onOpenMaterials} onOpenPlan={onOpenPlan} onEditPreferences={onEditPreferences} /> : null}
-        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} preferences={account.preferences} materials={materials} sessions={sessions} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} onGeneratePlan={requestPlanForPdf} onOpenLesson={onOpenLesson} /> : null}
+        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} preferences={account.preferences} materials={materials} sessions={sessions} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} planProgress={planProgress} aiModelStatus={aiModelStatus} modelDownloadProgress={modelDownloadProgress} onDownloadModel={requestModelDownload} onCancelModelDownload={stopModelDownload} onRemoveModel={requestModelRemoval} onGeneratePlan={requestPlanForPdf} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'plan' ? <PlanTab ownerId={account.id} sessions={sessions} setSessions={setSessions} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'progress' ? <ProgressTab account={account} materials={materials} sessions={sessions} onEditPreferences={onEditPreferences} /> : null}
         <Pressable style={styles.signOut} onPress={() => Alert.alert('Cerrar sesión', '¿Quieres volver a la pantalla de acceso?', [{text: 'Cancelar', style: 'cancel'}, {text: 'Cerrar sesión', style: 'destructive', onPress: onSignOut}])}>
@@ -185,7 +280,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
   );
 }
 
-function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, setSessions, generatingPlanFor, onGeneratePlan, onOpenLesson}: {ownerId: string; preferences: UserProfile['preferences']; materials: Material[]; sessions: StudySessionRecord[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; onGeneratePlan: (file: LocalPdf) => void; onOpenLesson: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void}) {
+function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, setSessions, generatingPlanFor, planProgress, aiModelStatus, modelDownloadProgress, onDownloadModel, onCancelModelDownload, onRemoveModel, onGeneratePlan, onOpenLesson}: {ownerId: string; preferences: UserProfile['preferences']; materials: Material[]; sessions: StudySessionRecord[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; planProgress: string; aiModelStatus: AIModelStatus; modelDownloadProgress: ModelDownloadProgress | null; onDownloadModel: () => void; onCancelModelDownload: () => void; onRemoveModel: () => void; onGeneratePlan: (file: LocalPdf) => void; onOpenLesson: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void}) {
   const [uploading, setUploading] = useState(false);
 
   const importPdf = async () => {
@@ -228,6 +323,40 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
       <Text style={styles.pageTitle}>Materiales</Text>
       <Text style={styles.subGreeting}>Importa un PDF de tu dispositivo. El contenido y el plan se procesan y guardan solo aquí.</Text>
       <PrimaryButton title={uploading ? 'Guardando PDF…' : 'Importar PDF'} icon={uploading ? 'hourglass-outline' : 'add'} onPress={() => { void importPdf(); }} disabled={uploading} />
+      <SurfaceCard style={styles.aiModelCard}>
+        <View style={styles.aiModelHeading}>
+          <View style={styles.aiModelIcon}><Ionicons name="sparkles-outline" size={19} color={colors.primary} /></View>
+          <View style={styles.aiModelCopy}>
+            <Text style={styles.sectionTitle}>IA generativa en tu teléfono</Text>
+            <Text style={styles.cardCaption}>{LOCAL_AI_MODEL.name}</Text>
+          </View>
+          <Ionicons name={aiModelStatus === 'ready' ? 'checkmark-circle' : 'phone-portrait-outline'} size={20} color={aiModelStatus === 'ready' ? colors.teal : colors.muted} />
+        </View>
+        <Text style={styles.aiModelDescription}>
+          {aiModelStatus === 'ready'
+            ? 'Lista para analizar PDFs sin conexión. El texto, las citas y los planes se quedan en este dispositivo.'
+            : aiModelStatus === 'downloading'
+              ? 'Descargando el modelo al almacenamiento privado. Tus PDFs no participan en esta descarga.'
+              : aiModelStatus === 'checking'
+                ? 'Comprobando si el modelo ya está instalado en este teléfono…'
+                : `Descarga única de ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)}. La IA analizará aquí el PDF y usará tus preferencias para crear actividades.`}
+        </Text>
+        {aiModelStatus === 'downloading' ? <>
+          <View style={styles.progressTrack} accessibilityRole="progressbar" accessibilityValue={{min: 0, max: 100, now: modelDownloadProgress?.percent ?? 0}}>
+            <View style={[styles.progressFill, {width: `${modelDownloadProgress?.percent ?? 0}%`}]} />
+          </View>
+          <View style={styles.aiModelActionRow}>
+            <Text style={styles.aiModelMeta}>{modelDownloadProgress ? `${modelDownloadProgress.percent}% · ${formatModelSize(modelDownloadProgress.bytesWritten)} de ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)}` : 'Preparando descarga…'}</Text>
+            <Pressable onPress={onCancelModelDownload} accessibilityRole="button" accessibilityLabel="Cancelar descarga del modelo"><Text style={styles.aiModelActionText}>Cancelar</Text></Pressable>
+          </View>
+        </> : aiModelStatus === 'ready' ? <Pressable onPress={onRemoveModel} disabled={!!generatingPlanFor} style={[styles.aiModelActionRow, !!generatingPlanFor && styles.disabledControl]} accessibilityRole="button">
+          <Text style={styles.aiModelMeta}>Modelo descargado · no requiere internet</Text>
+          <Text style={styles.aiModelActionText}>Eliminar</Text>
+        </Pressable> : aiModelStatus === 'missing' ? <Pressable onPress={onDownloadModel} style={styles.aiModelDownloadButton} accessibilityRole="button">
+          <Ionicons name="download-outline" size={18} color={colors.primary} />
+          <Text style={styles.aiModelDownloadText}>Descargar IA local · {formatModelSize(LOCAL_AI_MODEL.sizeBytes)}</Text>
+        </Pressable> : null}
+      </SurfaceCard>
       <View style={styles.materialList}>
         {materials.map((material, index) => (
           <View key={material.id} style={styles.materialCard}>
@@ -246,8 +375,13 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
               onPress={() => onGeneratePlan(material.localFile)}
               accessibilityRole="button"
               accessibilityLabel={`${generatingPlanFor === material.localFile.id ? 'Analizando' : material.topics ? 'Actualizar plan de estudio con' : 'Crear plan de estudio con'} ${material.name}`}
-            ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? 'Analizando el contenido local…' : material.topics ? `${material.topics} temas · Actualizar plan` : 'Crear plan de estudio desde este PDF'}</Text></Pressable>
+            ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? planProgress || 'La IA local está analizando…' : material.topics ? `${material.topics} temas · Actualizar con IA local` : 'Crear plan con IA local desde este PDF'}</Text></Pressable>
             {material.localFile.analysis ? <View style={styles.analysisPreview}>
+              <Text style={styles.analysisProviderLabel}>
+                {material.localFile.analysis.analysisProvider === 'local-llm'
+                  ? `Generado con IA local · ${material.localFile.analysis.modelName ?? 'modelo local'}`
+                  : 'Análisis anterior por reglas · actualiza el plan para generarlo con IA local'}
+              </Text>
               <Text style={styles.analysisSummary} numberOfLines={3}>{material.localFile.analysis.summary}</Text>
               <Text style={styles.analysisTopicsTitle}>
                 Temas organizados
@@ -276,6 +410,10 @@ function toLocalMaterial(file: LocalPdf): Material {
 function formatFileSize(size: number) {
   if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatModelSize(size: number) {
+  return `${(size / 1_000_000_000).toFixed(2)} GB`;
 }
 
 function VoiceNotesPanel({ownerId}: {ownerId: string}) {
@@ -684,8 +822,8 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
     return () => { active = false; };
   }, [materialId, ownerId]);
   const topic = material?.topics[topicIndex];
-  const keyPoints = topic ? [topic.title, topic.explanation, ...topic.questions.slice(0, 3)] : material?.keyPoints ?? [];
-  const speechText = topic?.explanation ?? material?.summary ?? '';
+  const keyPoints = topic ? [topic.title, ...(topic.visualOutline?.length ? topic.visualOutline : [topic.explanation]), ...topic.questions.slice(0, 3)] : material?.keyPoints ?? [];
+  const speechText = topic?.listenScript ?? topic?.explanation ?? material?.summary ?? '';
   useEffect(() => () => { void Speech.stop(); }, []);
   const toggleSpeech = () => {
     if (speaking) {
@@ -724,6 +862,7 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
         {mode === 'listen' ? <SurfaceCard style={styles.audioCard}><Pressable style={styles.audioCircle} onPress={toggleSpeech} accessibilityLabel={speaking ? 'Detener lectura en voz alta' : 'Escuchar resumen'}><Ionicons name={speaking ? 'stop' : 'play'} size={20} color={colors.surface} /></Pressable><View style={{flex: 1}}><Text style={styles.sectionTitle}>{speaking ? 'Reproduciendo resumen' : 'Escucha el resumen'}</Text><Text style={styles.cardCaption}>{speechText || 'Carga un tema desde tu plan para escucharlo.'}</Text></View><Ionicons name="volume-high-outline" size={20} color={colors.teal} /></SurfaceCard> : null}
         {mode === 'visual' ? <VisualSummary points={keyPoints} /> : null}
         {mode === 'practice' ? topic?.questions.length ? <View style={styles.practiceList}>{topic.questions.map((question, index) => <PracticeQuestion key={`${index}-${question}`} index={index} question={question} sourceText={topic.explanation} />)}</View> : <View style={styles.infoBox}><Ionicons name="document-text-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Abre un tema de un PDF organizado para practicar con preguntas basadas en ese contenido.</Text></View> : null}
+        {topic?.sourceEvidence ? <LessonSection title="Cita del PDF" body={topic.sourceEvidence} /> : null}
         <SurfaceCard style={styles.sourceCard}><Ionicons name="document-text-outline" size={18} color={colors.muted} /><Text style={styles.sourceText}>{material ? `Organizado desde ${material.originalName}` : 'Contenido de tu sesión'}</Text></SurfaceCard>
       </ScrollView>
     </AppPage>
@@ -823,6 +962,17 @@ const styles = StyleSheet.create({
   signOutText: {fontSize: 12, color: colors.muted},
   pageTitle: {fontSize: 27, color: colors.text, fontWeight: '800', letterSpacing: -0.5, marginTop: 9},
   materialList: {gap: 11, marginTop: 18},
+  aiModelCard: {marginTop: 16},
+  aiModelHeading: {flexDirection: 'row', alignItems: 'center', gap: 10},
+  aiModelIcon: {width: 38, height: 38, borderRadius: 12, backgroundColor: '#EEEFFE', alignItems: 'center', justifyContent: 'center'},
+  aiModelCopy: {flex: 1},
+  aiModelDescription: {fontSize: 12, lineHeight: 18, color: colors.muted, marginTop: 11},
+  aiModelActionRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 10},
+  aiModelMeta: {flex: 1, fontSize: 11, lineHeight: 16, color: colors.muted},
+  aiModelActionText: {fontSize: 12, color: colors.primary, fontWeight: '700'},
+  aiModelDownloadButton: {minHeight: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 11, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background},
+  aiModelDownloadText: {fontSize: 12, color: colors.primary, fontWeight: '700'},
+  disabledControl: {opacity: 0.5},
   voiceNotesCard: {marginTop: 15},
   voiceNotesHeading: {flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 13},
   voiceNoteRow: {flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.border},
@@ -835,6 +985,7 @@ const styles = StyleSheet.create({
   materialOpen: {flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 11},
   deleteMaterialButton: {width: 34, height: 34, alignItems: 'center', justifyContent: 'center'},
   analysisPreview: {borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10},
+  analysisProviderLabel: {fontSize: 10, color: colors.teal, fontWeight: '700', marginBottom: 5},
   analysisSummary: {fontSize: 12, color: colors.muted, lineHeight: 18},
   analysisTopicsTitle: {fontSize: 11, fontWeight: '700', color: colors.text, marginTop: 9, marginBottom: 3},
   analysisWarning: {fontSize: 11, color: colors.danger, lineHeight: 16, marginTop: 5},
