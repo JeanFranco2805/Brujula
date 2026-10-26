@@ -1,10 +1,24 @@
 import type {LearningFormat, StudyPreferences} from '../types';
 
+const titleVerbs = new Set([
+  'es', 'son', 'fue', 'fueron', 'está', 'están', 'estaba', 'estaban', 'será', 'serán',
+  'tiene', 'tienen', 'tenía', 'contiene', 'contienen', 'incluye', 'incluyen', 'consiste',
+  'permite', 'permiten', 'produce', 'producen', 'transforma', 'transforman', 'convierte',
+  'convierten', 'ocurre', 'ocurren', 'define', 'definen', 'llama', 'llaman', 'representa',
+  'representan', 'significa', 'significan', 'utiliza', 'utilizan', 'realiza', 'realizan',
+  'forma', 'forman', 'genera', 'generan', 'puede', 'pueden', 'debe', 'deben', 'sirve',
+  'sirven', 'provoca', 'provocan', 'desarrolla', 'desarrollan', 'estudia', 'analiza',
+]);
+
 export type StudyTopic = {title: string; explanation: string; questions: string[]};
 export type LocalPdfAnalysis = {
   summary: string;
   keyPoints: string[];
   topics: StudyTopic[];
+  extractedCharacters?: number;
+  extractedWords?: number;
+  pageCount?: number;
+  warnings?: string[];
   analysisProvider: 'on-device';
   analyzedAt: string;
 };
@@ -33,7 +47,7 @@ export class LocalPdfAnalysisError extends Error {
 }
 
 /** Organizes text extracted on the phone. This deliberately makes no network calls. */
-export function analyzeLocalStudyText(sourceText: string, now = new Date()): LocalPdfAnalysis {
+export function analyzeLocalStudyText(sourceText: string, now = new Date(), pageCount?: number): LocalPdfAnalysis {
   const cleanText = normalizePdfText(sourceText);
   const sentences = splitSentences(cleanText);
   const meaningfulWords = cleanText.match(/[\p{L}\p{N}]{2,}/gu) ?? [];
@@ -42,18 +56,31 @@ export function analyzeLocalStudyText(sourceText: string, now = new Date()): Loc
   }
 
   const sectionTopics = topicsFromHeadings(cleanText);
-  const topics = (sectionTopics.length >= 2 ? sectionTopics : topicsFromSentences(sentences)).slice(0, 20);
+  const topics = sectionTopics.length >= 2 ? sectionTopics : topicsFromSentences(sentences);
   if (!topics.length) {
     throw new LocalPdfAnalysisError('No pudimos separar temas de este PDF. Comprueba que tenga texto seleccionable.');
   }
 
-  const keyPoints = topics.map(topic => topic.explanation.match(/^[\s\S]*?[.!?](?=\s|$)/u)?.[0]?.trim() ?? topic.explanation)
+  const keyPoints = topics.map(topic => splitSentences(topic.explanation)[0] ?? topic.explanation)
     .filter(Boolean)
     .slice(0, 12)
     .map(point => point.slice(0, 320));
   const summary = topics.slice(0, 3).map(topic => topic.explanation).join(' ').slice(0, 900);
+  const warnings = pageCount && cleanText.length / pageCount < 160
+    ? ['Se encontró poco texto seleccionable por página. Algunas páginas podrían ser escaneos o imágenes y no se pudieron leer.']
+    : [];
 
-  return {summary, keyPoints, topics, analysisProvider: 'on-device', analyzedAt: now.toISOString()};
+  return {
+    summary,
+    keyPoints,
+    topics,
+    extractedCharacters: cleanText.length,
+    extractedWords: meaningfulWords.length,
+    ...(pageCount ? {pageCount} : {}),
+    warnings,
+    analysisProvider: 'on-device',
+    analyzedAt: now.toISOString(),
+  };
 }
 
 /** Creates a weekday plan from local PDF topics and the learner's saved preferences. */
@@ -136,10 +163,13 @@ export function formatLocalDate(date: Date) {
 
 function normalizePdfText(sourceText: string) {
   return sourceText
+    .normalize('NFKC')
+    .replace(/[\u00ad\u200b\u200c\u200d\ufeff]/g, '')
+    .replace(/[\uFB00-\uFB06]/g, ligature => ({'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬃ': 'ffi', 'ﬄ': 'ffl', 'ﬅ': 'st', 'ﬆ': 'st'}[ligature] ?? ligature))
     .replace(/\u0000/g, ' ')
     .replace(/([\p{L}\p{N}])-\s*\n\s*([\p{L}\p{N}])/gu, '$1$2')
-    .replace(/\f/g, '\n')
-    .replace(/^\s*(?:p[aá]gina\s+)?\d+(?:\s+de\s+\d+)?\s*$/gimu, '')
+    .replace(/\f/g, '\n\n')
+    .replace(/^\s*(?:(?:p[aá]gina|page)\s+)?\d+(?:\s+(?:de|of)\s+\d+)?\s*$/gimu, '')
     .replace(/[\t ]+/g, ' ')
     .replace(/ *\n */g, '\n')
     .replace(/\n{3,}/g, '\n\n')
@@ -149,42 +179,112 @@ function normalizePdfText(sourceText: string) {
 function splitSentences(text: string) {
   return (text.match(/[^.!?]+[.!?]+["»')\]]*|[^.!?]+$/gu) ?? [])
     .map(sentence => sentence.replace(/\s+/g, ' ').trim())
-    .filter(sentence => sentence.replace(/[^\p{L}\p{N}]/gu, '').length >= 28)
-    .slice(0, 180);
+    .filter(sentence => sentence.replace(/[^\p{L}\p{N}]/gu, '').length >= 12);
 }
 
 function topicsFromHeadings(text: string): StudyTopic[] {
-  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  const lines = text.split('\n').map(line => line.trim());
   const headings: {index: number; title: string}[] = [];
   lines.forEach((line, index) => {
-    if (isHeading(line)) headings.push({index, title: line.replace(/^[\d.\-\s]+/, '').replace(/:$/, '').slice(0, 120)});
+    if (!line) return;
+    const previous = previousNonEmptyLine(lines, index);
+    const next = nextNonEmptyLine(lines, index);
+    if (isHeading(line, previous, next)) headings.push({index, title: line.replace(/^[\d.\-\s]+/, '').replace(/:$/, '').slice(0, 120)});
   });
   if (headings.length < 2) return [];
 
   return headings.flatMap((heading, headingIndex) => {
     const end = headings[headingIndex + 1]?.index ?? lines.length;
     const body = lines.slice(heading.index + 1, end).join(' ').replace(/\s+/g, ' ').trim();
-    if (body.length < 40) return [];
-    return [makeTopic(heading.title, body)];
+    if ((body.match(/[\p{L}\p{N}]/gu) ?? []).length < 12) return [];
+    return splitTextIntoTopics(body, heading.title);
   });
 }
 
-function isHeading(line: string) {
+function isHeading(line: string, previous: string, next: string) {
   const words = line.split(/\s+/u);
   if (line.length < 4 || line.length > 100 || words.length > 14 || /[.!?]$/.test(line)) return false;
-  return /^(?:(?:unidad|cap[ií]tulo|tema|lecci[oó]n|secci[oó]n|m[oó]dulo|chapter|unit|section)\s+|\d+(?:\.\d+)*[.)]?\s+)/iu.test(line)
-    || (/[\p{L}]/u.test(line) && line === line.toUpperCase());
+  if (/^(?:(?:unidad|cap[ií]tulo|tema|lecci[oó]n|secci[oó]n|m[oó]dulo|chapter|unit|section)\s+)/iu.test(line)) return true;
+  const numbered = line.match(/^(\d+(?:\.\d+)*[.)]?)\s+(.+)$/u);
+  if (numbered) {
+    const label = numbered[2].trim();
+    return label.length <= 72 && label.split(/\s+/u).length <= 9 && !/[,;!?]/u.test(label);
+  }
+  if (/[\p{L}]/u.test(line) && line === line.toLocaleUpperCase()) return true;
+
+  // Plain headings lose font size and bold metadata during text extraction.
+  // Accept title case only when surrounding lines indicate a section boundary.
+  const hasSentencePunctuation = /[.!?;,:]/u.test(line);
+  const previousEndsBlock = !previous || /[.!?]$/.test(previous);
+  const nextLooksLikeBody = next.length >= Math.max(45, line.length * 1.25) && /^\p{Lu}/u.test(next);
+  return !hasSentencePunctuation && words.length <= 8 && line.length <= 68
+    && /^\p{Lu}/u.test(line) && previousEndsBlock && nextLooksLikeBody;
 }
 
 function topicsFromSentences(sentences: string[]): StudyTopic[] {
   const topics: StudyTopic[] = [];
-  for (let index = 0; index < sentences.length && topics.length < 20; index += 3) {
-    const group = sentences.slice(index, index + 3);
-    const explanation = group.join(' ').slice(0, 1500);
-    const title = group[0].replace(/^[\d.\-\s]+/, '').split(/\s+/u).slice(0, 8).join(' ').replace(/[,:;]$/, '');
-    if (explanation.length >= 40) topics.push(makeTopic(title || `Tema ${topics.length + 1}`, explanation));
+  let group: string[] = [];
+  let groupLength = 0;
+  const appendGroup = () => {
+    if (!group.length) return;
+    const explanation = group.join(' ');
+    const title = titleFromSentence(group[0]);
+    topics.push(makeTopic(title || `Tema ${topics.length + 1}`, explanation));
+    group = [];
+    groupLength = 0;
+  };
+
+  for (const sentence of sentences.flatMap(splitOversizedText)) {
+    if (group.length && groupLength + sentence.length > 1100) appendGroup();
+    group.push(sentence);
+    groupLength += sentence.length;
   }
+  appendGroup();
   return topics;
+}
+
+function titleFromSentence(sentence: string) {
+  const words = sentence.match(/[\p{L}\p{N}]+/gu) ?? [];
+  const firstVerb = words.findIndex((word, index) => index > 0 && titleVerbs.has(word.toLocaleLowerCase()));
+  const length = firstVerb > 0 ? firstVerb : Math.min(6, words.length);
+  return words.slice(0, Math.min(6, Math.max(2, length))).join(' ').replace(/[,:;]$/, '');
+}
+
+function splitOversizedText(text: string) {
+  const maxLength = 1500;
+  if (text.length <= maxLength) return [text];
+  const chunks: string[] = [];
+  let chunk = '';
+  for (const word of text.match(/\S+\s*/gu) ?? [text]) {
+    if (chunk && chunk.length + word.length > maxLength) {
+      chunks.push(chunk.trim());
+      chunk = '';
+    }
+    chunk += word;
+  }
+  if (chunk.trim()) chunks.push(chunk.trim());
+  return chunks;
+}
+
+function splitTextIntoTopics(text: string, heading: string): StudyTopic[] {
+  const sentences = splitSentences(text);
+  const parts = topicsFromSentences(sentences.length ? sentences : [text]);
+  if (parts.length <= 1) return [makeTopic(heading, text)];
+  return parts.map((part, index) => ({
+    ...part,
+    title: heading + ' · parte ' + (index + 1),
+    questions: makeTopic(heading, part.explanation).questions,
+  }));
+}
+
+function previousNonEmptyLine(lines: string[], index: number) {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) if (lines[cursor]) return lines[cursor];
+  return '';
+}
+
+function nextNonEmptyLine(lines: string[], index: number) {
+  for (let cursor = index + 1; cursor < lines.length; cursor += 1) if (lines[cursor]) return lines[cursor];
+  return '';
 }
 
 function makeTopic(title: string, explanation: string): StudyTopic {
@@ -196,7 +296,7 @@ function makeTopic(title: string, explanation: string): StudyTopic {
   const detailExercise = blankInformativeTerm(secondSentence, displayTitle);
   return {
     title: cleanTitle,
-    explanation: explanation.slice(0, 1500),
+    explanation,
     questions: [
       titleExercise ? `Completa sin mirar el PDF: ${titleExercise}` : `Explica con tus propias palabras la idea principal de “${displayTitle}”.`,
       detailExercise ? `Recuerda este detalle del material: ${detailExercise}` : `¿Qué ejemplo puedes relacionar con “${displayTitle}”?`,
