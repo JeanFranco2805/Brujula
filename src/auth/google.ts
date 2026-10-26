@@ -45,7 +45,7 @@ export function useGoogleSignIn() {
         if (!idToken) throw new Error('Google no devolvió un token de identidad.');
         await onIdToken(idToken);
       } else if (result.type === 'error') {
-        Alert.alert('No se pudo continuar con Google', result.error?.message ?? 'Inténtalo de nuevo.');
+        Alert.alert('No se pudo continuar con Google', result.error?.description ?? result.error?.params?.error_description ?? 'Inténtalo de nuevo.');
       }
     } catch (error) {
       Alert.alert('No se pudo continuar con Google', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
