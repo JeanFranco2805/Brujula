@@ -10,7 +10,15 @@ const titleVerbs = new Set([
   'sirven', 'provoca', 'provocan', 'desarrolla', 'desarrollan', 'estudia', 'analiza',
 ]);
 
-export type StudyTopic = {title: string; explanation: string; questions: string[]};
+export type StudyTopic = {
+  title: string;
+  explanation: string;
+  questions: string[];
+  /** AI-generated study aids grounded in a quote from the source PDF. */
+  sourceEvidence?: string;
+  visualOutline?: string[];
+  listenScript?: string;
+};
 export type LocalPdfAnalysis = {
   summary: string;
   keyPoints: string[];
@@ -19,7 +27,8 @@ export type LocalPdfAnalysis = {
   extractedWords?: number;
   pageCount?: number;
   warnings?: string[];
-  analysisProvider: 'on-device';
+  analysisProvider: 'on-device' | 'local-llm';
+  modelName?: string;
   analyzedAt: string;
 };
 
