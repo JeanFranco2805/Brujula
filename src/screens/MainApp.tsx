@@ -16,21 +16,24 @@ import * as DocumentPicker from 'expo-document-picker';
 import {RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder, useAudioRecorderState} from 'expo-audio';
 import {extractTextWithInfo, isAvailable as isPdfTextExtractionAvailable} from 'expo-pdf-text-extract';
 import * as Speech from 'expo-speech';
+import {getLocales} from 'expo-localization';
 import {cancelStudyReminder, exportSessionsToDeviceCalendar, removeSessionFromDeviceCalendar, scheduleStudyReminder, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
 import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, openLocalPdf, saveLocalPdfAnalysis, type LocalPdf} from '../services/local-pdfs';
-import {formatLocalDate, generateLocalStudyPlan, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
+import {formatLocalDate, generateLocalStudyPlan, getConciseKeyIdeas, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
 import {cancelLocalAIModelDownload, ensureLocalAIModelInstalled, generateLocalAIAnalysis, isLocalAIModelInstalled, removeLocalAIModel} from '../services/local-ai-device';
 import {LOCAL_AI_MODEL, type ModelDownloadProgress} from '../services/local-ai-model-manager';
 import {loadLocalStudyPlan, removeLocalMaterialSessions, replaceLocalMaterialSessions, saveLocalStudyPlan} from '../services/local-study-plan-store';
 import {deleteLocalVoiceNote, loadLocalVoiceNotes, saveLocalVoiceNote, type LocalVoiceNote} from '../services/local-voice-notes';
 import {AppPage, Brand, Pill, PrimaryButton, SectionHeading, SurfaceCard} from '../components/ui';
+import {AdaptivePractice} from '../components/AdaptivePractice';
+import {getLearningLanguageLabel} from '../services/learning-language';
 import {colors, radius} from '../theme';
 import type {LearningFormat, UserProfile} from '../types';
 
 export type TabKey = 'home' | 'materials' | 'plan' | 'progress';
 type Material = {id: string; name: string; topics: number; summary?: string; localFile: LocalPdf};
 type StudySessionRecord = DeviceStudySession & LocalStudySession;
-type LocalMaterialContent = {id: string; originalName: string; summary: string; keyPoints: string[]; topics: StudyTopic[]};
+type LocalMaterialContent = {id: string; originalName: string; summary: string; keyPoints: string[]; topics: StudyTopic[]; plannerVersion?: number; targetLanguage?: string};
 type AIModelStatus = 'checking' | 'missing' | 'downloading' | 'ready';
 
 const formatLabels: Record<LearningFormat, string> = {
@@ -114,7 +117,8 @@ export function MainApp({
         throw new Error(reason);
       }
       setPlanProgress('Preparando el modelo de IA local…');
-      const analysis = await generateLocalAIAnalysis(extraction.text, account.preferences, extraction.pageCount, progress => {
+      const languageTag = getLocales()[0]?.languageTag ?? 'es-CO';
+      const analysis = await generateLocalAIAnalysis(extraction.text, account.preferences, extraction.pageCount, languageTag, progress => {
         if (progress.stage === 'loading-model') setPlanProgress(`Cargando la IA local… ${progress.percent}%`);
         else setPlanProgress(`La IA local está organizando el contenido… ${progress.completedChunks} de ${progress.totalChunks} partes`);
       });
@@ -383,6 +387,7 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
                   : 'Análisis anterior por reglas · actualiza el plan para generarlo con IA local'}
               </Text>
               <Text style={styles.analysisSummary} numberOfLines={3}>{material.localFile.analysis.summary}</Text>
+              {material.localFile.analysis.plannerVersion !== 2 || !material.localFile.analysis.targetLanguage ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={17} color={colors.primary} /><Text style={styles.infoBoxText}>Este plan todavía no tiene ideas breves ni práctica adaptativa. Pulsa “Actualizar con IA local” para organizarlo en tu teléfono.</Text></View> : <Text style={styles.languageNote}>Adaptado en {getLearningLanguageLabel(material.localFile.analysis.targetLanguage)} · las citas conservan el idioma del PDF.</Text>}
               <Text style={styles.analysisTopicsTitle}>
                 Temas organizados
                 {material.localFile.analysis.extractedWords ? ' · ' + material.localFile.analysis.extractedWords.toLocaleString('es-CO') + ' palabras' : ''}
@@ -815,15 +820,17 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
       .then(files => {
         const file = files.find(item => item.id === materialId);
         if (active && file?.analysis) {
-          setMaterial({id: file.id, originalName: file.name, summary: file.analysis.summary, keyPoints: file.analysis.keyPoints, topics: file.analysis.topics});
+          setMaterial({id: file.id, originalName: file.name, summary: file.analysis.summary, keyPoints: file.analysis.keyPoints, topics: file.analysis.topics, plannerVersion: file.analysis.plannerVersion, targetLanguage: file.analysis.targetLanguage});
         }
       })
       .catch(error => Alert.alert('No se pudo abrir el tema', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
     return () => { active = false; };
   }, [materialId, ownerId]);
   const topic = material?.topics[topicIndex];
-  const keyPoints = topic ? [topic.title, ...(topic.visualOutline?.length ? topic.visualOutline : [topic.explanation]), ...topic.questions.slice(0, 3)] : material?.keyPoints ?? [];
+  const keyPoints = topic ? getConciseKeyIdeas(topic) : material?.keyPoints.slice(0, 3) ?? [];
   const speechText = topic?.listenScript ?? topic?.explanation ?? material?.summary ?? '';
+  const speechLanguage = material?.targetLanguage ?? getLocales()[0]?.languageTag ?? 'es-CO';
+  const hasCurrentAnalysis = material?.plannerVersion === 2 && !!material.targetLanguage;
   useEffect(() => () => { void Speech.stop(); }, []);
   const toggleSpeech = () => {
     if (speaking) {
@@ -836,7 +843,7 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
       return;
     }
     setSpeaking(true);
-    Speech.speak(speechText, {language: 'es-ES', onDone: () => setSpeaking(false), onStopped: () => setSpeaking(false), onError: () => setSpeaking(false)});
+    Speech.speak(compactLessonText(speechText, 420), {language: speechLanguage, onDone: () => setSpeaking(false), onStopped: () => setSpeaking(false), onError: () => setSpeaking(false)});
   };
   return (
     <AppPage>
@@ -850,6 +857,8 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
           <View style={styles.lessonIcon}><Ionicons name="leaf-outline" size={25} color={colors.teal} /></View>
           <View style={{flex: 1}}><Text style={styles.lessonTitle}>{topic?.title ?? material?.originalName ?? 'Tu sesión de estudio'}</Text><Text style={styles.materialMeta}>{material?.originalName ?? 'Contenido de tu material'}</Text></View>
         </View>
+        {material && hasCurrentAnalysis ? <View style={styles.languageBanner}><Ionicons name="language-outline" size={16} color={colors.teal} /><Text style={styles.languageBannerText}>Contenido adaptado en {getLearningLanguageLabel(material.targetLanguage!)} · las citas conservan el idioma original.</Text></View> : null}
+        {material && !hasCurrentAnalysis ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Este material tiene un plan anterior. Vuelve a Materiales y pulsa “Actualizar con IA local” para generar ideas breves, traducción y ejercicios adaptativos.</Text></View> : null}
         <View style={styles.suggestedBanner}><Ionicons name="sparkles-outline" size={16} color={colors.primary} /><Text style={styles.suggestedText}>Sugerido para ti: {suggested}</Text></View>
         <View style={styles.lessonModes}>
           <LessonMode title="Leer" icon="book-outline" active={mode === 'read'} onPress={() => setMode('read')} />
@@ -857,11 +866,11 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
           <LessonMode title="Esquema" icon="git-network-outline" active={mode === 'visual'} onPress={() => setMode('visual')} />
           <LessonMode title="Practicar" icon="create-outline" active={mode === 'practice'} onPress={() => setMode('practice')} />
         </View>
-        {mode === 'read' ? <LessonSection title={topic?.title ?? 'Resumen del material'} body={topic?.explanation ?? material?.summary ?? 'Abre una sesión desde tu plan para estudiar los temas que organizamos desde tu PDF.'} /> : null}
-        {mode === 'read' && material?.summary ? <LessonSection title="Resumen del documento" body={material.summary} /> : null}
-        {mode === 'listen' ? <SurfaceCard style={styles.audioCard}><Pressable style={styles.audioCircle} onPress={toggleSpeech} accessibilityLabel={speaking ? 'Detener lectura en voz alta' : 'Escuchar resumen'}><Ionicons name={speaking ? 'stop' : 'play'} size={20} color={colors.surface} /></Pressable><View style={{flex: 1}}><Text style={styles.sectionTitle}>{speaking ? 'Reproduciendo resumen' : 'Escucha el resumen'}</Text><Text style={styles.cardCaption}>{speechText || 'Carga un tema desde tu plan para escucharlo.'}</Text></View><Ionicons name="volume-high-outline" size={20} color={colors.teal} /></SurfaceCard> : null}
-        {mode === 'visual' ? <VisualSummary points={keyPoints} /> : null}
-        {mode === 'practice' ? topic?.questions.length ? <View style={styles.practiceList}>{topic.questions.map((question, index) => <PracticeQuestion key={`${index}-${question}`} index={index} question={question} sourceText={topic.explanation} />)}</View> : <View style={styles.infoBox}><Ionicons name="document-text-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Abre un tema de un PDF organizado para practicar con preguntas basadas en ese contenido.</Text></View> : null}
+        {mode === 'read' ? <LessonSection title={topic?.title ?? 'Resumen del material'} body={compactLessonText(topic?.explanation ?? material?.summary ?? 'Abre una sesión desde tu plan para estudiar los temas que organizamos desde tu PDF.')} /> : null}
+        {mode === 'read' && topic ? <VisualSummary points={keyPoints} title={topic.kind === 'assignment' ? 'Entregables clave' : 'Ideas clave'} /> : null}
+        {mode === 'listen' ? <SurfaceCard style={styles.audioCard}><Pressable style={styles.audioCircle} onPress={toggleSpeech} accessibilityLabel={speaking ? 'Detener lectura en voz alta' : 'Escuchar resumen'}><Ionicons name={speaking ? 'stop' : 'play'} size={20} color={colors.surface} /></Pressable><View style={{flex: 1}}><Text style={styles.sectionTitle}>{speaking ? 'Reproduciendo resumen' : 'Escucha el resumen'}</Text><Text style={styles.cardCaption} numberOfLines={4}>{compactLessonText(speechText || 'Carga un tema desde tu plan para escucharlo.', 250)}</Text></View><Ionicons name="volume-high-outline" size={20} color={colors.teal} /></SurfaceCard> : null}
+        {mode === 'visual' ? <VisualSummary points={keyPoints} title={topic?.kind === 'assignment' ? 'Entregables clave' : 'Ideas clave'} /> : null}
+        {mode === 'practice' ? topic?.activities?.length ? <AdaptivePractice key={`${ownerId}:${material?.id ?? materialId ?? 'lesson'}:${topicIndex}`} ownerId={ownerId} lessonKey={`${material?.id ?? materialId ?? 'lesson'}:${topicIndex}`} activities={topic.activities} goal={preferences.goal} /> : <View style={styles.infoBox}><Ionicons name="document-text-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>{hasCurrentAnalysis ? 'Este tema no tiene actividades verificadas. Actualiza el material desde Materiales para volver a generarlas.' : 'El plan anterior no tiene ejercicios validados. Actualiza el material con IA local para practicar con actividades basadas en el PDF.'}</Text></View> : null}
         {topic?.sourceEvidence ? <LessonSection title="Cita del PDF" body={topic.sourceEvidence} /> : null}
         <SurfaceCard style={styles.sourceCard}><Ionicons name="document-text-outline" size={18} color={colors.muted} /><Text style={styles.sourceText}>{material ? `Organizado desde ${material.originalName}` : 'Contenido de tu sesión'}</Text></SurfaceCard>
       </ScrollView>
@@ -877,25 +886,22 @@ function LessonSection({title, body}: {title: string; body: string}) {
   return <SurfaceCard style={styles.lessonSection}><Text style={styles.lessonSectionTitle}>{title}</Text><Text style={styles.lessonBody}>{body}</Text></SurfaceCard>;
 }
 
-function PracticeQuestion({index, question, sourceText}: {index: number; question: string; sourceText: string}) {
-  const [answer, setAnswer] = useState('');
-  const [showSource, setShowSource] = useState(false);
-  return <SurfaceCard style={styles.practiceCard}>
-    <Text style={styles.practiceLabel}>PREGUNTA {index + 1}</Text>
-    <Text style={styles.lessonSectionTitle}>{question}</Text>
-    <TextInput value={answer} onChangeText={setAnswer} placeholder="Escribe tu respuesta con tus palabras" placeholderTextColor={colors.muted} multiline textAlignVertical="top" style={styles.practiceInput} accessibilityLabel={`Tu respuesta a la pregunta ${index + 1}`} />
-    <Pressable style={styles.revealSourceButton} onPress={() => setShowSource(value => !value)}><Ionicons name={showSource ? 'eye-off-outline' : 'eye-outline'} size={16} color={colors.primary} /><Text style={styles.revealSourceText}>{showSource ? 'Ocultar referencia' : 'Comparar con el material'}</Text></Pressable>
-    {showSource ? <Text style={styles.lessonBody}>{sourceText}</Text> : null}
-  </SurfaceCard>;
-}
-
-function VisualSummary({points}: {points: string[]}) {
+function VisualSummary({points, title = 'Ideas clave'}: {points: string[]; title?: string}) {
   return (
     <SurfaceCard style={styles.visualCard}>
-      <Text style={styles.lessonSectionTitle}>Ideas clave</Text>
+      <Text style={styles.lessonSectionTitle}>{title}</Text>
       {points.length ? points.slice(0, 6).map((point, index) => <View key={`${index}-${point}`} style={styles.visualPoint}><View style={[styles.visualStepIcon, {backgroundColor: index % 2 ? colors.tealSoft : colors.amberSoft}]}><Text style={styles.visualPointIndex}>{index + 1}</Text></View><Text style={styles.visualPointText}>{point}</Text></View>) : <Text style={styles.lessonBody}>No hay un esquema para este tema todavía.</Text>}
     </SurfaceCard>
   );
+}
+
+function compactLessonText(value: string, maxLength = 460) {
+  const sentences = value.replace(/\s+/g, ' ').trim().match(/[^.!?。！？]+[.!?。！？]?/gu) ?? [];
+  const compact = sentences.slice(0, 2).join(' ').trim();
+  if (compact.length <= maxLength) return compact;
+  const clipped = compact.slice(0, maxLength);
+  const lastSpace = clipped.lastIndexOf(' ');
+  return `${clipped.slice(0, lastSpace > maxLength * 0.65 ? lastSpace : maxLength).trimEnd()}…`;
 }
 
 function SessionRow({time, title, detail, status, onPress, onEdit, onDelete, onComplete}: {time: string; title: string; detail: string; status: 'done' | 'next' | 'planned'; onPress?: () => void; onEdit?: () => void; onDelete?: () => void; onComplete?: () => void}) {
@@ -987,6 +993,7 @@ const styles = StyleSheet.create({
   analysisPreview: {borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10},
   analysisProviderLabel: {fontSize: 10, color: colors.teal, fontWeight: '700', marginBottom: 5},
   analysisSummary: {fontSize: 12, color: colors.muted, lineHeight: 18},
+  languageNote: {fontSize: 10, lineHeight: 15, color: colors.teal, marginTop: 6, marginBottom: 4},
   analysisTopicsTitle: {fontSize: 11, fontWeight: '700', color: colors.text, marginTop: 9, marginBottom: 3},
   analysisWarning: {fontSize: 11, color: colors.danger, lineHeight: 16, marginTop: 5},
   analysisTopic: {minHeight: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, borderTopWidth: 1, borderTopColor: colors.border},
@@ -1070,12 +1077,6 @@ const styles = StyleSheet.create({
   lessonSection: {marginBottom: 11},
   lessonSectionTitle: {fontSize: 16, color: colors.text, fontWeight: '700', marginBottom: 7},
   lessonBody: {fontSize: 14, lineHeight: 22, color: colors.muted},
-  practiceList: {gap: 10},
-  practiceCard: {marginBottom: 3},
-  practiceLabel: {fontSize: 10, letterSpacing: 0.7, fontWeight: '800', color: colors.primary, marginBottom: 7},
-  practiceInput: {minHeight: 84, maxHeight: 160, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, padding: 11, color: colors.text, backgroundColor: colors.background, fontSize: 14, lineHeight: 20, marginTop: 10},
-  revealSourceButton: {flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', paddingVertical: 10},
-  revealSourceText: {fontSize: 12, color: colors.primary, fontWeight: '700'},
   audioCard: {flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 14},
   audioCircle: {width: 42, height: 42, borderRadius: 21, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center'},
   visualCard: {marginBottom: 14},
@@ -1085,6 +1086,8 @@ const styles = StyleSheet.create({
   visualPoint: {flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 8},
   visualPointIndex: {fontSize: 15, fontWeight: '800', color: colors.primary},
   visualPointText: {flex: 1, fontSize: 12, lineHeight: 18, color: colors.muted},
+  languageBanner: {flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 10, borderRadius: radius.sm, backgroundColor: colors.tealSoft, marginBottom: 12},
+  languageBannerText: {flex: 1, fontSize: 11, lineHeight: 16, color: colors.teal, fontWeight: '600'},
   visualStepText: {fontSize: 10, color: colors.muted, fontWeight: '600'},
   sourceCard: {flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 11, marginBottom: 14},
   sourceText: {fontSize: 12, color: colors.muted},
