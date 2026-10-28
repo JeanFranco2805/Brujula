@@ -65,12 +65,14 @@ export async function generateLocalAIAnalysis(
   sourceText: string,
   preferences: StudyPreferences,
   pageCount: number | undefined,
+  languageTag: string,
   onProgress?: (progress: LocalAIProgress) => void,
 ) {
   const modelPath = await modelManager.ensureInstalled();
   return analyzeWithLocalAI(sourceText, {
     preferences,
     pageCount,
+    languageTag,
     modelName: LOCAL_AI_MODEL.name,
     onProgress,
     createContext: async reportLoadProgress => {
