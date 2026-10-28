@@ -54,7 +54,8 @@
         }
       ],
       "expo-font",
-      "expo-asset"
+      "expo-asset",
+      "expo-localization"
     ],
     "ios": {
       "supportsTablet": true
