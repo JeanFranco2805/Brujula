@@ -14,15 +14,37 @@ export type StudyTopic = {
   title: string;
   explanation: string;
   questions: string[];
+  /** Short, distinct ideas for scan-friendly visual review. */
+  keyIdeas?: string[];
+  /** Validated interactive activities generated from the local source text. */
+  activities?: LearningActivity[];
+  /** Assignment briefs are taught as requirements and deliverables, not fake concepts. */
+  kind?: 'concept' | 'assignment';
   /** AI-generated study aids grounded in a quote from the source PDF. */
   sourceEvidence?: string;
   visualOutline?: string[];
   listenScript?: string;
 };
+
+export type LearningActivity = {
+  kind: 'choice' | 'cloze' | 'recall';
+  prompt: string;
+  options: string[];
+  answer: string;
+  /** Exact phrase in the source language, used to validate the translated answer. */
+  sourceAnswer: string;
+  feedback: string;
+  /** Exact source quote; it intentionally remains in the PDF's original language. */
+  evidence: string;
+};
+
 export type LocalPdfAnalysis = {
   summary: string;
   keyPoints: string[];
   topics: StudyTopic[];
+  /** Versioned so old device-only analyses can be regenerated with compact translated lessons. */
+  plannerVersion?: number;
+  targetLanguage?: string;
   extractedCharacters?: number;
   extractedWords?: number;
   pageCount?: number;
@@ -53,6 +75,25 @@ export class LocalPdfAnalysisError extends Error {
     super(message);
     this.name = 'LocalPdfAnalysisError';
   }
+}
+
+/** Keeps legacy visual plans readable while new analyses store dedicated key ideas. */
+export function getConciseKeyIdeas(topic: StudyTopic, maxItems = 3) {
+  const candidates = topic.keyIdeas?.length ? topic.keyIdeas : topic.visualOutline ?? [];
+  const points = candidates.length ? candidates : [topic.explanation];
+  const result: string[] = [];
+  for (const point of points) {
+    const cleaned = point.replace(/\s+/g, ' ').trim();
+    const sentence = cleaned.match(/^[^.!?。！？]+[.!?。！？]?/u)?.[0]?.trim() ?? cleaned;
+    const isAllCapsHeading = /[\p{L}]/u.test(sentence) && sentence === sentence.toLocaleUpperCase();
+    if (!sentence || isAllCapsHeading || /^[¿?]/u.test(sentence) || /\b(?:group|team|grupo|equipo)\s*[:#-]?\s*\d+\b/iu.test(sentence)) continue;
+    const clipped = sentence.length > 120
+      ? `${sentence.slice(0, 120).replace(/\s+\S*$/u, '').trimEnd()}…`
+      : sentence;
+    if (!result.some(existing => existing.toLocaleLowerCase() === clipped.toLocaleLowerCase())) result.push(clipped);
+    if (result.length >= maxItems) break;
+  }
+  return result;
 }
 
 /** Organizes text extracted on the phone. This deliberately makes no network calls. */
