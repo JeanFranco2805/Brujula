@@ -1,4 +1,4 @@
-import {analyzeLocalStudyText, generateLocalStudyPlan, LocalPdfAnalysisError} from '../../src/services/local-study-planner';
+import {analyzeLocalStudyText, generateLocalStudyPlan, getConciseKeyIdeas, LocalPdfAnalysisError} from '../../src/services/local-study-planner';
 import type {StudyPreferences} from '../../src/types';
 
 const examPreferences: StudyPreferences = {
@@ -9,6 +9,28 @@ const examPreferences: StudyPreferences = {
 };
 
 describe('local study planner', () => {
+  it('turns legacy long outlines into a few short, readable key ideas', () => {
+    const ideas = getConciseKeyIdeas({
+      title: 'Tema',
+      explanation: 'Una explicación útil para estudiar. Un segundo párrafo que no debe aparecer.',
+      questions: ['¿Qué significa el grupo 19?'],
+      visualOutline: [
+        'METODOLOGY AND INSTRUCTIONS',
+        'This section describes an assignment with a very long explanation that should be cut down to a concise sentence for comfortable reading on a phone. More unnecessary text.',
+        'GROUP: 19',
+        'Students should identify the central idea.',
+        'Students should identify the central idea.',
+      ],
+    });
+
+    expect(ideas).toEqual([
+      'This section describes an assignment with a very long explanation that should be cut down to a concise sentence for…',
+      'Students should identify the central idea.',
+    ]);
+    expect(ideas).toHaveLength(2);
+    expect(ideas.every(idea => idea.length <= 120)).toBe(true);
+  });
+
   it('extracts titled sections, key points, summary, and review prompts from text', () => {
     const text = [
       'TEMA 1: La célula',
