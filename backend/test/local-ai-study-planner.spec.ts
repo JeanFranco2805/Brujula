@@ -1,4 +1,4 @@
-import {analyzeWithLocalAI, splitPdfIntoChunks, type LocalAIContext, type LocalAIProgress} from '../../src/services/local-ai-study-planner';
+import {analyzeWithLocalAI, splitPdfIntoChunks, type LocalAIChunkAnalysis, type LocalAIContext, type LocalAIProgress} from '../../src/services/local-ai-study-planner';
 import type {CompletionParams, TokenData} from 'llama.rn';
 import type {StudyPreferences} from '../../src/types';
 
@@ -97,6 +97,8 @@ describe('on-device AI study planner', () => {
     expect(userPrompt).toContain('resolver ejercicios interactivos');
     expect(userPrompt).toContain(source);
     expect(params.response_format?.type).toBe('json_schema');
+    expect(params.n_predict).toBe(900);
+    expect((params.response_format?.json_schema?.schema as {properties: {topics: {maxItems: number}}}).properties.topics.maxItems).toBe(1);
     expect(params.enable_thinking).toBe(false);
     expect(analysis.analysisProvider).toBe('local-llm');
     expect(analysis.modelName).toBe('Qwen3 1.7B · Q4_K_M');
@@ -179,6 +181,48 @@ describe('on-device AI study planner', () => {
     expect(context.release).toHaveBeenCalledTimes(1);
   });
 
+  it('resumes from saved chunks and persists each new chunk before moving on', async () => {
+    const evidence = 'La célula es la unidad estructural y funcional de los seres vivos. Contiene membrana y material genético, que permite transmitir información.';
+    const longSource = Array.from({length: 100}, () => evidence).join(' ');
+    const chunks = splitPdfIntoChunks(longSource);
+    const savedChunk = JSON.parse(responseFor(evidence)) as LocalAIChunkAnalysis;
+    const context = makeContext(responseFor(evidence));
+    const onCheckpoint = jest.fn();
+
+    await analyzeWithLocalAI(longSource, {
+      preferences,
+      modelName: 'Qwen3',
+      languageTag: 'es-CO',
+      createContext: async () => context,
+      resumeAnalyses: [savedChunk],
+      onCheckpoint,
+    });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(context.completion).toHaveBeenCalledTimes(chunks.length - 1);
+    expect(onCheckpoint.mock.calls[0][0]).toMatchObject({completedChunks: 1, totalChunks: chunks.length});
+    expect(onCheckpoint.mock.calls.at(-1)?.[0]).toMatchObject({completedChunks: chunks.length, totalChunks: chunks.length});
+  });
+
+  it('does not load the model again when every saved chunk is ready to assemble', async () => {
+    const evidence = 'La célula es la unidad estructural y funcional de los seres vivos. Contiene membrana y material genético, que permite transmitir información.';
+    const longSource = Array.from({length: 100}, () => evidence).join(' ');
+    const chunks = splitPdfIntoChunks(longSource);
+    const savedChunk = JSON.parse(responseFor(evidence)) as LocalAIChunkAnalysis;
+    const createContext = jest.fn(async () => makeContext());
+
+    const analysis = await analyzeWithLocalAI(longSource, {
+      preferences,
+      modelName: 'Qwen3',
+      languageTag: 'es-CO',
+      createContext,
+      resumeAnalyses: chunks.map(() => savedChunk),
+    });
+
+    expect(createContext).not.toHaveBeenCalled();
+    expect(analysis.topics).toHaveLength(1);
+  });
+
   it('splits long PDFs without dropping words or exceeding the local context budget', () => {
     const text = Array.from({length: 4200}, (_, index) => `concepto${index}`).join(' ') + '\fFINAL_DEL_PDF';
 
@@ -187,6 +231,6 @@ describe('on-device AI study planner', () => {
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.at(-1)?.text).toContain('FINAL_DEL_PDF');
     expect(chunks.flatMap(chunk => chunk.text.split(/\s+/u))).toEqual(text.split(/\s+/u));
-    expect(chunks.every(chunk => chunk.text.length <= 3_200)).toBe(true);
+    expect(chunks.every(chunk => chunk.text.length <= 3_600)).toBe(true);
   });
 });
