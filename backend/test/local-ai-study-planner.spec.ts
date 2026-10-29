@@ -1,4 +1,5 @@
-import {analyzeWithLocalAI, splitPdfIntoChunks, type LocalAIContext} from '../../src/services/local-ai-study-planner';
+import {analyzeWithLocalAI, splitPdfIntoChunks, type LocalAIContext, type LocalAIProgress} from '../../src/services/local-ai-study-planner';
+import type {CompletionParams, TokenData} from 'llama.rn';
 import type {StudyPreferences} from '../../src/types';
 
 const preferences: StudyPreferences = {
@@ -12,7 +13,10 @@ const source = 'La célula es la unidad estructural y funcional de los seres viv
 
 function makeContext(responseText = responseFor(source)) {
   return {
-    completion: jest.fn(async () => ({text: responseText})),
+    completion: jest.fn(async (_params: CompletionParams, onToken?: (data: TokenData) => void) => {
+      onToken?.({token: 'token'});
+      return {text: responseText};
+    }),
     release: jest.fn(async () => undefined),
   } as unknown as LocalAIContext;
 }
@@ -108,6 +112,12 @@ describe('on-device AI study planner', () => {
     expect(analysis.topics[0].listenScript).toContain('La célula');
     expect(context.release).toHaveBeenCalledTimes(1);
     expect(onProgress).toHaveBeenCalledWith({stage: 'analyzing', completedChunks: 1, totalChunks: 1});
+    expect(onProgress).toHaveBeenCalledWith({stage: 'analyzing', completedChunks: 0, totalChunks: 1});
+    expect(onProgress).toHaveBeenCalledWith({stage: 'generating', completedChunks: 0, totalChunks: 1, elapsedSeconds: expect.any(Number)});
+    const progressCalls = onProgress.mock.calls as [LocalAIProgress][];
+    expect(progressCalls.every(([event]) => event.stage !== 'loading-model' || event.percent < 100)).toBe(true);
+    const firstAnalysisProgressIndex = progressCalls.findIndex(([event]) => event.stage === 'analyzing' && event.completedChunks === 0);
+    expect(onProgress.mock.invocationCallOrder[firstAnalysisProgressIndex]).toBeLessThan(completion.mock.invocationCallOrder[0]);
   });
 
   it('rejects a generated answer whose quote is not present in the PDF excerpt', async () => {
@@ -150,7 +160,7 @@ describe('on-device AI study planner', () => {
 
   it('fails instead of inventing a plan when the text is empty or contains no study topics', async () => {
     const createContext = jest.fn(async () => makeContext(JSON.stringify({summary: '', keyPoints: [], topics: []})));
-    await expect(analyzeWithLocalAI('Este texto explica información general de una página sin desarrollar ningún concepto didáctico.', {preferences, modelName: 'Qwen3', languageTag: 'es-CO', createContext})).rejects.toThrow('no encontró conceptos');
+    await expect(analyzeWithLocalAI('Este texto explica información general de una página sin desarrollar ningún concepto didáctico.', {preferences, modelName: 'Qwen3', languageTag: 'es-CO', createContext})).rejects.toThrow('No se encontraron conceptos');
     await expect(analyzeWithLocalAI(' ', {preferences, modelName: 'Qwen3', languageTag: 'es-CO', createContext})).rejects.toThrow('OCR local');
   });
 
