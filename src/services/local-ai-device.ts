@@ -1,7 +1,7 @@
 import {Directory, File, Paths} from 'expo-file-system';
 import {initLlama, loadLlamaModelInfo} from 'llama.rn';
 import type {StudyPreferences} from '../types';
-import {analyzeWithLocalAI, type LocalAIProgress} from './local-ai-study-planner';
+import {analyzeWithLocalAI, type LocalAIChunkAnalysis, type LocalAIProgress} from './local-ai-study-planner';
 import {createLocalAIModelManager, LOCAL_AI_MODEL, type LocalAIModelStorage, type ModelDownloadProgress, type StoredModelFile} from './local-ai-model-manager';
 
 const modelDirectory = new Directory(Paths.document, 'brujula-local-ai');
@@ -67,15 +67,20 @@ export async function generateLocalAIAnalysis(
   pageCount: number | undefined,
   languageTag: string,
   onProgress?: (progress: LocalAIProgress) => void,
+  resume?: {
+    resumeAnalyses?: readonly unknown[];
+    onCheckpoint?: (checkpoint: {completedChunks: number; totalChunks: number; analyses: LocalAIChunkAnalysis[]}) => void | Promise<void>;
+  },
 ) {
-  const modelPath = await modelManager.ensureInstalled();
   return analyzeWithLocalAI(sourceText, {
     preferences,
     pageCount,
     languageTag,
     modelName: LOCAL_AI_MODEL.name,
     onProgress,
+    ...resume,
     createContext: async reportLoadProgress => {
+      const modelPath = await modelManager.ensureInstalled();
       onProgress?.({stage: 'loading-model', percent: 0});
       const context = await initLlama({
         model: modelPath,
