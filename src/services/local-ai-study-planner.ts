@@ -65,6 +65,7 @@ const responseSchema = {
 
 export type LocalAIProgress =
   | {stage: 'loading-model'; percent: number}
+  | {stage: 'generating'; completedChunks: number; totalChunks: number; elapsedSeconds: number}
   | {stage: 'analyzing'; completedChunks: number; totalChunks: number};
 
 export type LocalAIContext = Pick<LlamaContext, 'completion' | 'release'>;
@@ -94,12 +95,27 @@ export async function analyzeWithLocalAI(
   }
 
   const chunks = splitPdfIntoChunks(cleanText);
-  const context = await options.createContext(percent => options.onProgress?.({stage: 'loading-model', percent}));
+  const context = await options.createContext(percent => options.onProgress?.({stage: 'loading-model', percent: Math.max(0, Math.min(99, Math.floor(percent)))}));
   const analyses: AIChunkAnalysis[] = [];
 
   try {
+    options.onProgress?.({stage: 'analyzing', completedChunks: 0, totalChunks: chunks.length});
+    // Yield once so the native screen can paint the analysis state before the first long inference.
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
     for (const [index, chunk] of chunks.entries()) {
-      const {text} = await context.completion(createCompletionParams(chunk, options.preferences, options.languageTag));
+      const generationStartedAt = Date.now();
+      let generatedTokens = 0;
+      const {text} = await context.completion(createCompletionParams(chunk, options.preferences, options.languageTag), () => {
+        generatedTokens += 1;
+        if (generatedTokens === 1 || generatedTokens % 16 === 0) {
+          options.onProgress?.({
+            stage: 'generating',
+            completedChunks: index,
+            totalChunks: chunks.length,
+            elapsedSeconds: Math.floor((Date.now() - generationStartedAt) / 1000),
+          });
+        }
+      });
       analyses.push(parseChunkAnalysis(text, chunk.text));
       options.onProgress?.({stage: 'analyzing', completedChunks: index + 1, totalChunks: chunks.length});
     }
@@ -109,7 +125,7 @@ export async function analyzeWithLocalAI(
 
   const topics = uniqueTopics(analyses.flatMap(analysis => analysis.topics)).slice(0, MAX_TOPICS);
   if (!topics.length) {
-    throw new LocalPdfAnalysisError('La IA local no encontró conceptos ni requisitos de estudio en el texto extraído. Revisa el PDF e inténtalo de nuevo.');
+    throw new LocalPdfAnalysisError('No se encontraron conceptos ni requisitos de estudio en el texto extraído. Revisa el PDF e inténtalo de nuevo.');
   }
 
   const summaries = uniqueCompactTexts(analyses.map(analysis => analysis.summary), 180, 3);
@@ -242,10 +258,10 @@ function parseChunkAnalysis(raw: string, source: string): AIChunkAnalysis {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new LocalPdfAnalysisError('La IA local devolvió una respuesta incompleta. Vuelve a generar el plan.');
+    throw new LocalPdfAnalysisError('El análisis quedó incompleto. Vuelve a intentarlo.');
   }
   if (!isRecord(parsed) || typeof parsed.summary !== 'string' || !Array.isArray(parsed.topics) || !Array.isArray(parsed.keyPoints)) {
-    throw new LocalPdfAnalysisError('La IA local respondió con un formato inválido. No guardamos el plan incompleto.');
+    throw new LocalPdfAnalysisError('La respuesta del análisis no tenía un formato válido. No guardamos el plan incompleto.');
   }
 
   const summary = compactGeneratedText(parsed.summary, 320, 1);
@@ -255,7 +271,7 @@ function parseChunkAnalysis(raw: string, source: string): AIChunkAnalysis {
 }
 
 function parseTopic(value: unknown, source: string): StudyTopic {
-  if (!isRecord(value)) throw new LocalPdfAnalysisError('La IA local devolvió un tema con datos incompletos.');
+  if (!isRecord(value)) throw new LocalPdfAnalysisError('El análisis devolvió un tema con datos incompletos.');
   const kind = value.kind === 'assignment' ? 'assignment' : value.kind === 'concept' ? 'concept' : null;
   const title = compactGeneratedText(value.title, 72, 1);
   const explanation = compactGeneratedText(value.explanation, 500, 2);
@@ -275,7 +291,7 @@ function parseTopic(value: unknown, source: string): StudyTopic {
 
   const visualOutline = uniqueCompactTexts(Array.isArray(value.visualOutline) ? value.visualOutline.filter((item): item is string => typeof item === 'string') : keyIdeas, 100, 3);
   const listenScript = compactGeneratedText(value.listenScript, 400, 2);
-  if (!listenScript) throw new LocalPdfAnalysisError('La IA local no terminó el guion breve para escuchar. Vuelve a generar el plan.');
+  if (!listenScript) throw new LocalPdfAnalysisError('No se pudo terminar el guion breve para escuchar. Vuelve a generar el plan.');
   return {
     kind,
     title,
