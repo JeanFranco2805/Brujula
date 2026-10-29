@@ -84,8 +84,10 @@ export async function generateLocalAIAnalysis(
         use_mmap: true,
         use_mlock: false,
         n_gpu_layers: 0,
-      }, percent => reportLoadProgress(Math.max(0, Math.min(100, Math.round(percent * 100)))));
-      onProgress?.({stage: 'loading-model', percent: 100});
+      }, percent => {
+        const normalizedPercent = Math.floor(percent * 100);
+        reportLoadProgress(Math.max(0, Math.min(99, normalizedPercent)));
+      });
       return context;
     },
   });
