@@ -1,4 +1,4 @@
-import {analyzeWithLocalAI, splitPdfIntoChunks, type LocalAIChunkAnalysis, type LocalAIContext, type LocalAIProgress} from '../../src/services/local-ai-study-planner';
+import {analyzeWithLocalAI, LOCAL_AI_COMPLETION_IDLE_TIMEOUT_MS, splitPdfIntoChunks, type LocalAIChunkAnalysis, type LocalAIContext, type LocalAIProgress} from '../../src/services/local-ai-study-planner';
 import type {CompletionParams, TokenData} from 'llama.rn';
 import type {StudyPreferences} from '../../src/types';
 
@@ -17,6 +17,7 @@ function makeContext(responseText = responseFor(source)) {
       onToken?.({token: 'token'});
       return {text: responseText};
     }),
+    stopCompletion: jest.fn(async () => undefined),
     release: jest.fn(async () => undefined),
   } as unknown as LocalAIContext;
 }
@@ -169,6 +170,7 @@ describe('on-device AI study planner', () => {
   it('releases the native model context when generation fails', async () => {
     const context = {
       completion: jest.fn(async () => { throw new Error('native generation failed'); }),
+      stopCompletion: jest.fn(async () => undefined),
       release: jest.fn(async () => undefined),
     } as unknown as LocalAIContext;
 
@@ -178,6 +180,37 @@ describe('on-device AI study planner', () => {
       languageTag: 'es-CO',
       createContext: async () => context,
     })).rejects.toThrow('native generation failed');
+    expect(context.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows elapsed generation time and stops a native inference that never responds', async () => {
+    jest.useFakeTimers();
+    const context = {
+      completion: jest.fn(() => new Promise<{text: string}>(() => undefined)),
+      stopCompletion: jest.fn(async () => undefined),
+      release: jest.fn(async () => undefined),
+    } as unknown as LocalAIContext;
+    const onProgress = jest.fn();
+    const analysisPromise = analyzeWithLocalAI(source, {
+      preferences,
+      modelName: 'Qwen3',
+      languageTag: 'es-CO',
+      createContext: async () => context,
+      onProgress,
+    });
+    const rejectedAnalysis = expect(analysisPromise).rejects.toThrow('El modelo dejó de responder');
+
+    try {
+      await jest.advanceTimersByTimeAsync(0);
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(onProgress).toHaveBeenCalledWith({stage: 'generating', completedChunks: 0, totalChunks: 1, elapsedSeconds: 5});
+      await jest.advanceTimersByTimeAsync(LOCAL_AI_COMPLETION_IDLE_TIMEOUT_MS);
+      await rejectedAnalysis;
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(context.stopCompletion).toHaveBeenCalledTimes(1);
     expect(context.release).toHaveBeenCalledTimes(1);
   });
 
