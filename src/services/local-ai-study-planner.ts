@@ -1,10 +1,12 @@
-import type {CompletionParams, LlamaContext} from 'llama.rn';
+import type {CompletionParams, LlamaContext, TokenData} from 'llama.rn';
 import type {StudyPreferences} from '../types';
 import {getLearningLanguageName} from './learning-language';
 import {LocalPdfAnalysisError, type LearningActivity, type LocalPdfAnalysis, type StudyTopic} from './local-study-planner';
 
 const MAX_CHUNK_CHARACTERS = 3_600;
 const MAX_PREDICTED_TOKENS = 900;
+export const LOCAL_AI_COMPLETION_IDLE_TIMEOUT_MS = 90_000;
+export const LOCAL_AI_COMPLETION_LIMIT_MS = 8 * 60_000;
 const MAX_TOPICS = 24;
 const MAX_KEY_POINTS = 8;
 const formatNames = {
@@ -65,10 +67,11 @@ const responseSchema = {
 
 export type LocalAIProgress =
   | {stage: 'loading-model'; percent: number}
+  | {stage: 'device-ready'; accelerated: boolean}
   | {stage: 'generating'; completedChunks: number; totalChunks: number; elapsedSeconds: number}
   | {stage: 'analyzing'; completedChunks: number; totalChunks: number};
 
-export type LocalAIContext = Pick<LlamaContext, 'completion' | 'release'>;
+export type LocalAIContext = Pick<LlamaContext, 'completion' | 'release' | 'stopCompletion'>;
 export type LocalAIContextFactory = (
   onLoadProgress: (percent: number) => void,
 ) => Promise<LocalAIContext>;
@@ -110,17 +113,27 @@ export async function analyzeWithLocalAI(
         const chunk = chunks[index];
         const generationStartedAt = Date.now();
         let generatedTokens = 0;
-        const {text} = await context.completion(createCompletionParams(chunk, options.preferences, options.languageTag), () => {
-          generatedTokens += 1;
-          if (generatedTokens === 1 || generatedTokens % 16 === 0) {
-            options.onProgress?.({
-              stage: 'generating',
-              completedChunks: index,
-              totalChunks: chunks.length,
-              elapsedSeconds: Math.floor((Date.now() - generationStartedAt) / 1000),
-            });
-          }
+        const reportGenerationProgress = () => options.onProgress?.({
+          stage: 'generating',
+          completedChunks: index,
+          totalChunks: chunks.length,
+          elapsedSeconds: Math.floor((Date.now() - generationStartedAt) / 1000),
         });
+        reportGenerationProgress();
+        const progressTimer = setInterval(reportGenerationProgress, 5_000);
+        let text: string;
+        try {
+          ({text} = await completeWithWatchdog(
+            context,
+            createCompletionParams(chunk, options.preferences, options.languageTag),
+            () => {
+              generatedTokens += 1;
+              if (generatedTokens === 1 || generatedTokens % 16 === 0) reportGenerationProgress();
+            },
+          ));
+        } finally {
+          clearInterval(progressTimer);
+        }
         analyses.push(parseChunkAnalysis(text, chunk.text));
         await options.onCheckpoint?.({completedChunks: analyses.length, totalChunks: chunks.length, analyses: [...analyses]});
         options.onProgress?.({stage: 'analyzing', completedChunks: index + 1, totalChunks: chunks.length});
@@ -157,6 +170,53 @@ export async function analyzeWithLocalAI(
     modelName: options.modelName,
     analyzedAt: (options.now ?? new Date()).toISOString(),
   };
+}
+
+async function completeWithWatchdog(
+  context: LocalAIContext,
+  params: CompletionParams,
+  onToken: (data: TokenData) => void,
+) {
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let totalTimer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  let rejectTimeout!: (error: Error) => void;
+  let stopPromise: Promise<void> | null = null;
+  const stopCompletion = () => {
+    stopPromise ??= context.stopCompletion().catch(() => undefined);
+    return stopPromise;
+  };
+  const timeoutPromise = new Promise<never>((_resolve, reject) => { rejectTimeout = reject; });
+  const timeoutError = new LocalPdfAnalysisError('El modelo dejó de responder en este bloque. Guardamos los bloques terminados; vuelve a pulsar «Reanudar» para intentarlo otra vez.');
+  const markTimedOut = () => {
+    if (timedOut) return;
+    timedOut = true;
+    rejectTimeout(timeoutError);
+  };
+  const resetIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(markTimedOut, LOCAL_AI_COMPLETION_IDLE_TIMEOUT_MS);
+  };
+
+  resetIdleTimer();
+  totalTimer = setTimeout(markTimedOut, LOCAL_AI_COMPLETION_LIMIT_MS);
+  try {
+    const result = await Promise.race([
+      context.completion(params, data => {
+        if (timedOut) return;
+        resetIdleTimer();
+        onToken(data);
+      }),
+      timeoutPromise,
+    ]);
+    return result;
+  } catch (error) {
+    if (timedOut) await stopCompletion();
+    throw error;
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (totalTimer) clearTimeout(totalTimer);
+  }
 }
 
 function restoreCompletedAnalyses(saved: readonly unknown[], chunks: PdfChunk[]) {
