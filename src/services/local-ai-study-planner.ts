@@ -3,8 +3,8 @@ import type {StudyPreferences} from '../types';
 import {getLearningLanguageName} from './learning-language';
 import {LocalPdfAnalysisError, type LearningActivity, type LocalPdfAnalysis, type StudyTopic} from './local-study-planner';
 
-const MAX_CHUNK_CHARACTERS = 3_200;
-const MAX_PREDICTED_TOKENS = 1_300;
+const MAX_CHUNK_CHARACTERS = 3_600;
+const MAX_PREDICTED_TOKENS = 900;
 const MAX_TOPICS = 24;
 const MAX_KEY_POINTS = 8;
 const formatNames = {
@@ -43,7 +43,7 @@ const responseSchema = {
     keyPoints: {type: 'array', items: {type: 'string', maxLength: 130}, maxItems: 5},
     topics: {
       type: 'array',
-      maxItems: 2,
+      maxItems: 1,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -74,7 +74,7 @@ export type LocalAIContextFactory = (
 ) => Promise<LocalAIContext>;
 
 type PdfChunk = {text: string; pageStart: number; pageEnd: number};
-type AIChunkAnalysis = {summary: string; keyPoints: string[]; topics: StudyTopic[]};
+export type LocalAIChunkAnalysis = {summary: string; keyPoints: string[]; topics: StudyTopic[]};
 
 export async function analyzeWithLocalAI(
   sourceText: string,
@@ -86,6 +86,8 @@ export async function analyzeWithLocalAI(
     now?: Date;
     createContext: LocalAIContextFactory;
     onProgress?: (progress: LocalAIProgress) => void;
+    resumeAnalyses?: readonly unknown[];
+    onCheckpoint?: (checkpoint: {completedChunks: number; totalChunks: number; analyses: LocalAIChunkAnalysis[]}) => void | Promise<void>;
   },
 ): Promise<LocalPdfAnalysis> {
   const cleanText = normalizePdfText(sourceText);
@@ -95,32 +97,39 @@ export async function analyzeWithLocalAI(
   }
 
   const chunks = splitPdfIntoChunks(cleanText);
-  const context = await options.createContext(percent => options.onProgress?.({stage: 'loading-model', percent: Math.max(0, Math.min(99, Math.floor(percent)))}));
-  const analyses: AIChunkAnalysis[] = [];
+  const analyses = restoreCompletedAnalyses(options.resumeAnalyses ?? [], chunks);
+  await options.onCheckpoint?.({completedChunks: analyses.length, totalChunks: chunks.length, analyses: [...analyses]});
 
-  try {
-    options.onProgress?.({stage: 'analyzing', completedChunks: 0, totalChunks: chunks.length});
-    // Yield once so the native screen can paint the analysis state before the first long inference.
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
-    for (const [index, chunk] of chunks.entries()) {
-      const generationStartedAt = Date.now();
-      let generatedTokens = 0;
-      const {text} = await context.completion(createCompletionParams(chunk, options.preferences, options.languageTag), () => {
-        generatedTokens += 1;
-        if (generatedTokens === 1 || generatedTokens % 16 === 0) {
-          options.onProgress?.({
-            stage: 'generating',
-            completedChunks: index,
-            totalChunks: chunks.length,
-            elapsedSeconds: Math.floor((Date.now() - generationStartedAt) / 1000),
-          });
-        }
-      });
-      analyses.push(parseChunkAnalysis(text, chunk.text));
-      options.onProgress?.({stage: 'analyzing', completedChunks: index + 1, totalChunks: chunks.length});
+  if (analyses.length < chunks.length) {
+    const context = await options.createContext(percent => options.onProgress?.({stage: 'loading-model', percent: Math.max(0, Math.min(99, Math.floor(percent)))}));
+    try {
+      options.onProgress?.({stage: 'analyzing', completedChunks: analyses.length, totalChunks: chunks.length});
+      // Yield once so the native screen can paint the analysis state before the first long inference.
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      for (let index = analyses.length; index < chunks.length; index += 1) {
+        const chunk = chunks[index];
+        const generationStartedAt = Date.now();
+        let generatedTokens = 0;
+        const {text} = await context.completion(createCompletionParams(chunk, options.preferences, options.languageTag), () => {
+          generatedTokens += 1;
+          if (generatedTokens === 1 || generatedTokens % 16 === 0) {
+            options.onProgress?.({
+              stage: 'generating',
+              completedChunks: index,
+              totalChunks: chunks.length,
+              elapsedSeconds: Math.floor((Date.now() - generationStartedAt) / 1000),
+            });
+          }
+        });
+        analyses.push(parseChunkAnalysis(text, chunk.text));
+        await options.onCheckpoint?.({completedChunks: analyses.length, totalChunks: chunks.length, analyses: [...analyses]});
+        options.onProgress?.({stage: 'analyzing', completedChunks: index + 1, totalChunks: chunks.length});
+      }
+    } finally {
+      await context.release();
     }
-  } finally {
-    await context.release();
+  } else {
+    options.onProgress?.({stage: 'analyzing', completedChunks: chunks.length, totalChunks: chunks.length});
   }
 
   const topics = uniqueTopics(analyses.flatMap(analysis => analysis.topics)).slice(0, MAX_TOPICS);
@@ -148,6 +157,21 @@ export async function analyzeWithLocalAI(
     modelName: options.modelName,
     analyzedAt: (options.now ?? new Date()).toISOString(),
   };
+}
+
+function restoreCompletedAnalyses(saved: readonly unknown[], chunks: PdfChunk[]) {
+  const restored: LocalAIChunkAnalysis[] = [];
+  for (let index = 0; index < Math.min(saved.length, chunks.length); index += 1) {
+    try {
+      const serialized = JSON.stringify(saved[index]);
+      if (!serialized) break;
+      restored.push(parseChunkAnalysis(serialized, chunks[index].text));
+    } catch {
+      // Only resume a contiguous prefix whose saved answers still match the local PDF text.
+      break;
+    }
+  }
+  return restored;
 }
 
 export function splitPdfIntoChunks(text: string): PdfChunk[] {
@@ -219,7 +243,7 @@ function createCompletionParams(chunk: PdfChunk, preferences: StudyPreferences, 
           `Escribe TODO el contenido dirigido al estudiante en ${languageName}. Conserva el término técnico original entre paréntesis solo cuando ayude a estudiar. sourceEvidence y sourceAnswer son citas del PDF y deben permanecer exactamente en el idioma original.`,
           'Separa información útil de encabezados, nombres de grupo, números de equipo, portadas e instrucciones administrativas. Nunca conviertas etiquetas como GROUP: 19 en temas o preguntas.',
           'Si el fragmento es una consigna de clase, clasifica el tema como assignment y resume sus entregables, restricciones y pasos verificables. Si enseña una materia, clasifica como concept y explica los conceptos del texto.',
-          'Devuelve como máximo dos temas del fragmento. El título debe nombrar la idea o tarea, no copiar un encabezado genérico. El resumen general debe tener una oración. Cada explicación debe tener como máximo dos oraciones cortas.',
+          'Devuelve solo el tema principal del fragmento. El título debe nombrar la idea o tarea, no copiar un encabezado genérico. El resumen general debe tener una oración. Cada explicación debe tener como máximo dos oraciones cortas.',
           'Devuelve de dos a tres keyIdeas atómicas por tema, una idea por línea y máximo 16 palabras por idea. No repitas el título, una explicación completa ni una pregunta en keyIdeas. No repitas la misma idea en varios temas.',
           'En cada tema crea exactamente tres actividades, en este orden: choice, cloze y recall. La pregunta debe referirse a un dato, concepto o requisito que aparezca en el PDF, nunca al nombre del grupo ni a un número aislado.',
           'choice y cloze: entrega tres opciones breves, una sola respuesta correcta y answer debe ser idéntica a esa opción. cloze debe incluir ____ en prompt. recall debe pedir una respuesta breve con palabras propias y options debe ser [].',
@@ -253,7 +277,7 @@ function createCompletionParams(chunk: PdfChunk, preferences: StudyPreferences, 
   };
 }
 
-function parseChunkAnalysis(raw: string, source: string): AIChunkAnalysis {
+function parseChunkAnalysis(raw: string, source: string): LocalAIChunkAnalysis {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
