@@ -145,12 +145,15 @@ export function MainApp({
         throw new Error(reason);
       }
       setPlanProgress(checkpoint ? 'Retomando el análisis guardado…' : 'Preparando el modelo de estudio…');
+      let accelerated = false;
       const analysis = await generateLocalAIAnalysis(extraction.text, account.preferences, extraction.pageCount, languageTag, progress => {
         if (progress.stage === 'loading-model') setPlanProgress(`Preparando el modelo… ${progress.percent}%`);
+        else if (progress.stage === 'device-ready') accelerated = progress.accelerated;
         else if (progress.stage === 'generating') {
           const minutes = String(Math.floor(progress.elapsedSeconds / 60)).padStart(2, '0');
           const seconds = String(progress.elapsedSeconds % 60).padStart(2, '0');
-          setPlanProgress(`Analizando bloque ${progress.completedChunks + 1} de ${progress.totalChunks} · ${minutes}:${seconds}`);
+          const mode = accelerated ? ' · aceleración activa' : ' · modo CPU';
+          setPlanProgress(`Bloque ${progress.completedChunks + 1}/${progress.totalChunks}${mode} · ${minutes}:${seconds}`);
         }
         else if (progress.completedChunks === 0) setPlanProgress('Analizando el primer bloque. Puede tardar unos minutos…');
         else if (progress.completedChunks >= progress.totalChunks) setPlanProgress('Organizando temas y ejercicios…');
