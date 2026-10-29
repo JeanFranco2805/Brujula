@@ -1,5 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Modal,
@@ -106,9 +107,9 @@ export function MainApp({
         setAIModelStatus('ready');
         setModelDownloadProgress(null);
       }
-      if (!modelInstalled) throw new Error('La IA local todavía no está instalada. Descarga el modelo desde Materiales e inténtalo otra vez.');
+      if (!modelInstalled) throw new Error('El modelo de estudio no está instalado. Descárgalo desde Materiales e inténtalo de nuevo.');
 
-      setPlanProgress('Extrayendo el texto del PDF en este teléfono…');
+      setPlanProgress('Leyendo tu PDF…');
       const extraction = await extractTextWithInfo(file.uri);
       if (!extraction.success) {
         const reason = extraction.passwordRequired
@@ -116,11 +117,18 @@ export function MainApp({
           : extraction.error || 'No se pudo extraer el texto del PDF.';
         throw new Error(reason);
       }
-      setPlanProgress('Preparando el modelo de IA local…');
+      setPlanProgress('Preparando el modelo de estudio…');
       const languageTag = getLocales()[0]?.languageTag ?? 'es-CO';
       const analysis = await generateLocalAIAnalysis(extraction.text, account.preferences, extraction.pageCount, languageTag, progress => {
-        if (progress.stage === 'loading-model') setPlanProgress(`Cargando la IA local… ${progress.percent}%`);
-        else setPlanProgress(`La IA local está organizando el contenido… ${progress.completedChunks} de ${progress.totalChunks} partes`);
+        if (progress.stage === 'loading-model') setPlanProgress(`Preparando el modelo… ${progress.percent}%`);
+        else if (progress.stage === 'generating') {
+          const minutes = String(Math.floor(progress.elapsedSeconds / 60)).padStart(2, '0');
+          const seconds = String(progress.elapsedSeconds % 60).padStart(2, '0');
+          setPlanProgress(`Analizando bloque ${progress.completedChunks + 1} de ${progress.totalChunks} · ${minutes}:${seconds}`);
+        }
+        else if (progress.completedChunks === 0) setPlanProgress('Analizando el primer bloque. Puede tardar unos minutos…');
+        else if (progress.completedChunks >= progress.totalChunks) setPlanProgress('Organizando temas y ejercicios…');
+        else setPlanProgress(`Analizados ${progress.completedChunks} de ${progress.totalChunks} bloques…`);
       });
       const savedFile = await saveLocalPdfAnalysis(account.id, file.id, analysis);
       const generated = generateLocalStudyPlan(file.id, analysis.topics, account.preferences);
@@ -132,7 +140,7 @@ export function MainApp({
       const pages = analysis.pageCount ? ' de ' + analysis.pageCount + ' páginas' : '';
       const warning = analysis.warnings?.length ? '\n\n' + analysis.warnings.join('\n') : '';
       const details = extractedWords ? `Analizó ${extractedWords} palabras${pages} y generó ` : 'Generó ';
-      Alert.alert('Tu plan está listo', `${details}${analysis.topics.length} temas en ${generated.length} sesiones según tus preferencias. Modelo: ${analysis.modelName ?? 'IA local'}.${warning}\n\nEl PDF, los temas y el plan permanecen en este dispositivo.`, [
+      Alert.alert('Tu plan está listo', `${details}${analysis.topics.length} temas en ${generated.length} sesiones según tus preferencias.${warning}\n\nEl PDF, los temas y el plan permanecen en este dispositivo.`, [
         {text: 'Ver mi plan', onPress: onOpenPlan},
         {text: 'Seguir aquí', style: 'cancel'},
       ]);
@@ -159,20 +167,20 @@ export function MainApp({
         return;
       }
       Alert.alert(
-        'Descargar IA local',
+        'Descargar modelo de estudio',
         `La primera descarga ocupa aproximadamente ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)} y requiere cerca de 1,4 GB libres. El modelo se queda en el teléfono; el PDF no se envía a ningún servidor.`,
         [
           {text: 'Ahora no', style: 'cancel'},
-          {text: 'Descargar y crear plan', onPress: () => { void generatePlanFromPdf(file, true); }},
+          {text: 'Descargar y continuar', onPress: () => { void generatePlanFromPdf(file, true); }},
         ],
       );
-    }).catch(error => Alert.alert('No se pudo revisar la IA local', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
+    }).catch(error => Alert.alert('No se pudo comprobar el modelo', error instanceof Error ? error.message : 'Inténtalo de nuevo.'));
   };
 
   const requestModelDownload = () => {
     if (aiModelStatus === 'downloading' || aiModelStatus === 'ready') return;
     Alert.alert(
-      'Instalar IA local',
+      'Descargar modelo de estudio',
       `Descargará ${LOCAL_AI_MODEL.name} (aprox. ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)}) al almacenamiento privado del teléfono. Necesitas cerca de 1,4 GB libres. Tus PDFs nunca se cargan.`,
       [
         {text: 'Cancelar', style: 'cancel'},
@@ -184,7 +192,7 @@ export function MainApp({
             .catch(error => {
               setAIModelStatus('missing');
               setModelDownloadProgress(null);
-              Alert.alert('No se pudo instalar la IA local', error instanceof Error ? error.message : 'Comprueba tu conexión e inténtalo otra vez.');
+              Alert.alert('No se pudo descargar el modelo', error instanceof Error ? error.message : 'Comprueba tu conexión e inténtalo otra vez.');
             });
         }},
       ],
@@ -331,19 +339,19 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
         <View style={styles.aiModelHeading}>
           <View style={styles.aiModelIcon}><Ionicons name="sparkles-outline" size={19} color={colors.primary} /></View>
           <View style={styles.aiModelCopy}>
-            <Text style={styles.sectionTitle}>IA generativa en tu teléfono</Text>
-            <Text style={styles.cardCaption}>{LOCAL_AI_MODEL.name}</Text>
+            <Text style={styles.sectionTitle}>Estudio inteligente en tu teléfono</Text>
+            <Text style={styles.cardCaption}>Modelo de estudio · {LOCAL_AI_MODEL.name}</Text>
           </View>
           <Ionicons name={aiModelStatus === 'ready' ? 'checkmark-circle' : 'phone-portrait-outline'} size={20} color={aiModelStatus === 'ready' ? colors.teal : colors.muted} />
         </View>
         <Text style={styles.aiModelDescription}>
           {aiModelStatus === 'ready'
-            ? 'Lista para analizar PDFs sin conexión. El texto, las citas y los planes se quedan en este dispositivo.'
+            ? 'Lista para organizar PDFs sin conexión. El documento, las citas y el plan se quedan en este dispositivo.'
             : aiModelStatus === 'downloading'
               ? 'Descargando el modelo al almacenamiento privado. Tus PDFs no participan en esta descarga.'
               : aiModelStatus === 'checking'
-                ? 'Comprobando si el modelo ya está instalado en este teléfono…'
-                : `Descarga única de ${formatModelSize(LOCAL_AI_MODEL.sizeBytes)}. La IA analizará aquí el PDF y usará tus preferencias para crear actividades.`}
+                ? 'Comprobando si el modelo de estudio ya está instalado…'
+                : `Descárgalo una sola vez (${formatModelSize(LOCAL_AI_MODEL.sizeBytes)}). Luego podrás organizar tus PDFs aquí mismo.`}
         </Text>
         {aiModelStatus === 'downloading' ? <>
           <View style={styles.progressTrack} accessibilityRole="progressbar" accessibilityValue={{min: 0, max: 100, now: modelDownloadProgress?.percent ?? 0}}>
@@ -358,7 +366,7 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
           <Text style={styles.aiModelActionText}>Eliminar</Text>
         </Pressable> : aiModelStatus === 'missing' ? <Pressable onPress={onDownloadModel} style={styles.aiModelDownloadButton} accessibilityRole="button">
           <Ionicons name="download-outline" size={18} color={colors.primary} />
-          <Text style={styles.aiModelDownloadText}>Descargar IA local · {formatModelSize(LOCAL_AI_MODEL.sizeBytes)}</Text>
+          <Text style={styles.aiModelDownloadText}>Descargar modelo · {formatModelSize(LOCAL_AI_MODEL.sizeBytes)}</Text>
         </Pressable> : null}
       </SurfaceCard>
       <View style={styles.materialList}>
@@ -378,16 +386,16 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
               disabled={generatingPlanFor === material.localFile.id}
               onPress={() => onGeneratePlan(material.localFile)}
               accessibilityRole="button"
-              accessibilityLabel={`${generatingPlanFor === material.localFile.id ? 'Analizando' : material.topics ? 'Actualizar plan de estudio con' : 'Crear plan de estudio con'} ${material.name}`}
-            ><Ionicons name={generatingPlanFor === material.localFile.id ? 'hourglass-outline' : 'sparkles-outline'} size={15} color={colors.primary} /><Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? planProgress || 'La IA local está analizando…' : material.topics ? `${material.topics} temas · Actualizar con IA local` : 'Crear plan con IA local desde este PDF'}</Text></Pressable>
+              accessibilityLabel={`${generatingPlanFor === material.localFile.id ? planProgress || 'Analizando documento' : material.topics ? 'Mejorar plan de estudio' : 'Crear plan de estudio'} · ${material.name}`}
+            >{generatingPlanFor === material.localFile.id ? <ActivityIndicator size="small" color={colors.primary} /> : <Ionicons name="sparkles-outline" size={15} color={colors.primary} />}<Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? planProgress || 'Analizando documento…' : material.topics ? `${material.topics} temas · Mejorar plan` : 'Crear plan de estudio'}</Text></Pressable>
             {material.localFile.analysis ? <View style={styles.analysisPreview}>
               <Text style={styles.analysisProviderLabel}>
                 {material.localFile.analysis.analysisProvider === 'local-llm'
-                  ? `Generado con IA local · ${material.localFile.analysis.modelName ?? 'modelo local'}`
-                  : 'Análisis anterior por reglas · actualiza el plan para generarlo con IA local'}
+                  ? `Organizado en este teléfono · ${material.localFile.analysis.modelName ?? 'modelo de estudio'}`
+                  : 'Organización básica · mejora el plan para añadir ejercicios y resúmenes breves'}
               </Text>
               <Text style={styles.analysisSummary} numberOfLines={3}>{material.localFile.analysis.summary}</Text>
-              {material.localFile.analysis.plannerVersion !== 2 || !material.localFile.analysis.targetLanguage ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={17} color={colors.primary} /><Text style={styles.infoBoxText}>Este plan todavía no tiene ideas breves ni práctica adaptativa. Pulsa “Actualizar con IA local” para organizarlo en tu teléfono.</Text></View> : <Text style={styles.languageNote}>Adaptado en {getLearningLanguageLabel(material.localFile.analysis.targetLanguage)} · las citas conservan el idioma del PDF.</Text>}
+              {material.localFile.analysis.plannerVersion !== 2 || !material.localFile.analysis.targetLanguage ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={17} color={colors.primary} /><Text style={styles.infoBoxText}>Este plan todavía no tiene ideas breves ni práctica adaptativa. Pulsa “Mejorar plan” para actualizarlo.</Text></View> : <Text style={styles.languageNote}>Adaptado en {getLearningLanguageLabel(material.localFile.analysis.targetLanguage)} · las citas conservan el idioma del PDF.</Text>}
               <Text style={styles.analysisTopicsTitle}>
                 Temas organizados
                 {material.localFile.analysis.extractedWords ? ' · ' + material.localFile.analysis.extractedWords.toLocaleString('es-CO') + ' palabras' : ''}
@@ -858,7 +866,7 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
           <View style={{flex: 1}}><Text style={styles.lessonTitle}>{topic?.title ?? material?.originalName ?? 'Tu sesión de estudio'}</Text><Text style={styles.materialMeta}>{material?.originalName ?? 'Contenido de tu material'}</Text></View>
         </View>
         {material && hasCurrentAnalysis ? <View style={styles.languageBanner}><Ionicons name="language-outline" size={16} color={colors.teal} /><Text style={styles.languageBannerText}>Contenido adaptado en {getLearningLanguageLabel(material.targetLanguage!)} · las citas conservan el idioma original.</Text></View> : null}
-        {material && !hasCurrentAnalysis ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Este material tiene un plan anterior. Vuelve a Materiales y pulsa “Actualizar con IA local” para generar ideas breves, traducción y ejercicios adaptativos.</Text></View> : null}
+        {material && !hasCurrentAnalysis ? <View style={styles.infoBox}><Ionicons name="sparkles-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Este material tiene un plan anterior. Vuelve a Materiales y pulsa “Mejorar plan” para actualizar sus ideas, idioma y ejercicios.</Text></View> : null}
         <View style={styles.suggestedBanner}><Ionicons name="sparkles-outline" size={16} color={colors.primary} /><Text style={styles.suggestedText}>Sugerido para ti: {suggested}</Text></View>
         <View style={styles.lessonModes}>
           <LessonMode title="Leer" icon="book-outline" active={mode === 'read'} onPress={() => setMode('read')} />
@@ -870,7 +878,7 @@ export function LessonScreen({ownerId, preferences, materialId, topicIndex = 0, 
         {mode === 'read' && topic ? <VisualSummary points={keyPoints} title={topic.kind === 'assignment' ? 'Entregables clave' : 'Ideas clave'} /> : null}
         {mode === 'listen' ? <SurfaceCard style={styles.audioCard}><Pressable style={styles.audioCircle} onPress={toggleSpeech} accessibilityLabel={speaking ? 'Detener lectura en voz alta' : 'Escuchar resumen'}><Ionicons name={speaking ? 'stop' : 'play'} size={20} color={colors.surface} /></Pressable><View style={{flex: 1}}><Text style={styles.sectionTitle}>{speaking ? 'Reproduciendo resumen' : 'Escucha el resumen'}</Text><Text style={styles.cardCaption} numberOfLines={4}>{compactLessonText(speechText || 'Carga un tema desde tu plan para escucharlo.', 250)}</Text></View><Ionicons name="volume-high-outline" size={20} color={colors.teal} /></SurfaceCard> : null}
         {mode === 'visual' ? <VisualSummary points={keyPoints} title={topic?.kind === 'assignment' ? 'Entregables clave' : 'Ideas clave'} /> : null}
-        {mode === 'practice' ? topic?.activities?.length ? <AdaptivePractice key={`${ownerId}:${material?.id ?? materialId ?? 'lesson'}:${topicIndex}`} ownerId={ownerId} lessonKey={`${material?.id ?? materialId ?? 'lesson'}:${topicIndex}`} activities={topic.activities} goal={preferences.goal} /> : <View style={styles.infoBox}><Ionicons name="document-text-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>{hasCurrentAnalysis ? 'Este tema no tiene actividades verificadas. Actualiza el material desde Materiales para volver a generarlas.' : 'El plan anterior no tiene ejercicios validados. Actualiza el material con IA local para practicar con actividades basadas en el PDF.'}</Text></View> : null}
+        {mode === 'practice' ? topic?.activities?.length ? <AdaptivePractice key={`${ownerId}:${material?.id ?? materialId ?? 'lesson'}:${topicIndex}`} ownerId={ownerId} lessonKey={`${material?.id ?? materialId ?? 'lesson'}:${topicIndex}`} activities={topic.activities} goal={preferences.goal} /> : <View style={styles.infoBox}><Ionicons name="document-text-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>{hasCurrentAnalysis ? 'Este tema no tiene actividades verificadas. Actualiza el material desde Materiales para volver a generarlas.' : 'El plan anterior no tiene ejercicios validados. Actualiza el material desde Materiales para practicar con actividades basadas en el PDF.'}</Text></View> : null}
         {topic?.sourceEvidence ? <LessonSection title="Cita del PDF" body={topic.sourceEvidence} /> : null}
         <SurfaceCard style={styles.sourceCard}><Ionicons name="document-text-outline" size={18} color={colors.muted} /><Text style={styles.sourceText}>{material ? `Organizado desde ${material.originalName}` : 'Contenido de tu sesión'}</Text></SurfaceCard>
       </ScrollView>
