@@ -20,6 +20,7 @@ import * as Speech from 'expo-speech';
 import {getLocales} from 'expo-localization';
 import {cancelStudyReminder, exportSessionsToDeviceCalendar, removeSessionFromDeviceCalendar, scheduleStudyReminder, scheduleStudyReminders, syncEnabledStudyTools, type DeviceStudySession} from '../services/device-study-tools';
 import {deleteLocalPdf, importLocalPdf, loadLocalPdfs, openLocalPdf, saveLocalPdfAnalysis, type LocalPdf} from '../services/local-pdfs';
+import {createLocalAIAnalysisFingerprint, loadLocalAIAnalysisProgress, removeLocalAIAnalysisProgress, saveLocalAIAnalysisProgress, type LocalAIAnalysisProgress} from '../services/local-ai-progress-store';
 import {formatLocalDate, generateLocalStudyPlan, getConciseKeyIdeas, type LocalStudySession, type StudyTopic} from '../services/local-study-planner';
 import {cancelLocalAIModelDownload, ensureLocalAIModelInstalled, generateLocalAIAnalysis, isLocalAIModelInstalled, removeLocalAIModel} from '../services/local-ai-device';
 import {LOCAL_AI_MODEL, type ModelDownloadProgress} from '../services/local-ai-model-manager';
@@ -64,6 +65,7 @@ export function MainApp({
 }) {
   const [materials, setMaterials] = useState<Material[]>([]);
   const [sessions, setSessions] = useState<StudySessionRecord[]>([]);
+  const [analysisProgresses, setAnalysisProgresses] = useState<Record<string, LocalAIAnalysisProgress>>({});
   const [generatingPlanFor, setGeneratingPlanFor] = useState<string | null>(null);
   const [aiModelStatus, setAIModelStatus] = useState<AIModelStatus>('checking');
   const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
@@ -73,14 +75,26 @@ export function MainApp({
   useEffect(() => {
     let active = true;
     Promise.all([loadLocalPdfs(account.id), loadLocalStudyPlan(account.id)])
-      .then(([files, plan]) => {
+      .then(async ([files, plan]) => {
+        const languageTag = getLocales()[0]?.languageTag ?? 'es-CO';
+        const progressEntries = await Promise.all(files.map(async file => {
+          const progress = await loadLocalAIAnalysisProgress(account.id, file.id).catch(() => null);
+          if (!progress) return null;
+          const fingerprint = createLocalAIAnalysisFingerprint(file.id, account.preferences, languageTag);
+          if (progress.fingerprint !== fingerprint) {
+            await removeLocalAIAnalysisProgress(account.id, file.id).catch(() => undefined);
+            return null;
+          }
+          return [file.id, progress] as const;
+        }));
         if (!active) return;
         setMaterials(files.map(toLocalMaterial));
         setSessions(plan);
+        setAnalysisProgresses(Object.fromEntries(progressEntries.filter((entry): entry is NonNullable<typeof entry> => entry !== null)));
       })
       .catch(() => undefined);
     return () => { active = false; };
-  }, [account.id]);
+  }, [account.id, account.preferences]);
 
   useEffect(() => {
     let active = true;
@@ -98,6 +112,19 @@ export function MainApp({
     }
     setGeneratingPlanFor(file.id);
     try {
+      const languageTag = getLocales()[0]?.languageTag ?? 'es-CO';
+      const fingerprint = createLocalAIAnalysisFingerprint(file.id, account.preferences, languageTag);
+      let checkpoint = await loadLocalAIAnalysisProgress(account.id, file.id).catch(() => null);
+      if (checkpoint && checkpoint.fingerprint !== fingerprint) {
+        await removeLocalAIAnalysisProgress(account.id, file.id).catch(() => undefined);
+        checkpoint = null;
+        setAnalysisProgresses(previous => { const next = {...previous}; delete next[file.id]; return next; });
+      }
+      if (checkpoint) {
+        const restoredCheckpoint = checkpoint;
+        setAnalysisProgresses(previous => ({...previous, [file.id]: restoredCheckpoint}));
+      }
+
       let modelInstalled = await isLocalAIModelInstalled();
       if (!modelInstalled && downloadModelFirst) {
         setAIModelStatus('downloading');
@@ -117,8 +144,7 @@ export function MainApp({
           : extraction.error || 'No se pudo extraer el texto del PDF.';
         throw new Error(reason);
       }
-      setPlanProgress('Preparando el modelo de estudio…');
-      const languageTag = getLocales()[0]?.languageTag ?? 'es-CO';
+      setPlanProgress(checkpoint ? 'Retomando el análisis guardado…' : 'Preparando el modelo de estudio…');
       const analysis = await generateLocalAIAnalysis(extraction.text, account.preferences, extraction.pageCount, languageTag, progress => {
         if (progress.stage === 'loading-model') setPlanProgress(`Preparando el modelo… ${progress.percent}%`);
         else if (progress.stage === 'generating') {
@@ -129,10 +155,19 @@ export function MainApp({
         else if (progress.completedChunks === 0) setPlanProgress('Analizando el primer bloque. Puede tardar unos minutos…');
         else if (progress.completedChunks >= progress.totalChunks) setPlanProgress('Organizando temas y ejercicios…');
         else setPlanProgress(`Analizados ${progress.completedChunks} de ${progress.totalChunks} bloques…`);
+      }, {
+        resumeAnalyses: checkpoint?.chunks,
+        onCheckpoint: async progress => {
+          const saved = await saveLocalAIAnalysisProgress(account.id, file.id, fingerprint, progress.totalChunks, progress.analyses);
+          checkpoint = saved;
+          setAnalysisProgresses(previous => ({...previous, [file.id]: saved}));
+        },
       });
       const savedFile = await saveLocalPdfAnalysis(account.id, file.id, analysis);
       const generated = generateLocalStudyPlan(file.id, analysis.topics, account.preferences);
       const nextSessions = await replaceLocalMaterialSessions(account.id, file.id, generated);
+      await removeLocalAIAnalysisProgress(account.id, file.id).catch(() => undefined);
+      setAnalysisProgresses(previous => { const next = {...previous}; delete next[file.id]; return next; });
       setMaterials(previous => [...previous.filter(material => material.id !== file.id), toLocalMaterial(savedFile)]);
       setSessions(nextSessions);
       await syncEnabledStudyTools(account.id, nextSessions).catch(() => undefined);
@@ -234,7 +269,7 @@ export function MainApp({
 
       <ScrollView contentContainerStyle={styles.mainContent} showsVerticalScrollIndicator={false}>
         {activeTab === 'home' ? <HomeTab firstName={firstName} account={account} materials={materials} sessions={sessions} onContinue={onOpenLesson} onOpenMaterials={onOpenMaterials} onOpenPlan={onOpenPlan} onEditPreferences={onEditPreferences} /> : null}
-        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} preferences={account.preferences} materials={materials} sessions={sessions} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} planProgress={planProgress} aiModelStatus={aiModelStatus} modelDownloadProgress={modelDownloadProgress} onDownloadModel={requestModelDownload} onCancelModelDownload={stopModelDownload} onRemoveModel={requestModelRemoval} onGeneratePlan={requestPlanForPdf} onOpenLesson={onOpenLesson} /> : null}
+        {activeTab === 'materials' ? <MaterialsTab ownerId={account.id} preferences={account.preferences} materials={materials} sessions={sessions} analysisProgresses={analysisProgresses} setAnalysisProgresses={setAnalysisProgresses} setMaterials={setMaterials} setSessions={setSessions} generatingPlanFor={generatingPlanFor} planProgress={planProgress} aiModelStatus={aiModelStatus} modelDownloadProgress={modelDownloadProgress} onDownloadModel={requestModelDownload} onCancelModelDownload={stopModelDownload} onRemoveModel={requestModelRemoval} onGeneratePlan={requestPlanForPdf} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'plan' ? <PlanTab ownerId={account.id} sessions={sessions} setSessions={setSessions} onOpenLesson={onOpenLesson} /> : null}
         {activeTab === 'progress' ? <ProgressTab account={account} materials={materials} sessions={sessions} onEditPreferences={onEditPreferences} /> : null}
         <Pressable style={styles.signOut} onPress={() => Alert.alert('Cerrar sesión', '¿Quieres volver a la pantalla de acceso?', [{text: 'Cancelar', style: 'cancel'}, {text: 'Cerrar sesión', style: 'destructive', onPress: onSignOut}])}>
@@ -292,7 +327,7 @@ function HomeTab({firstName, account, materials, sessions, onContinue, onOpenMat
   );
 }
 
-function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, setSessions, generatingPlanFor, planProgress, aiModelStatus, modelDownloadProgress, onDownloadModel, onCancelModelDownload, onRemoveModel, onGeneratePlan, onOpenLesson}: {ownerId: string; preferences: UserProfile['preferences']; materials: Material[]; sessions: StudySessionRecord[]; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; planProgress: string; aiModelStatus: AIModelStatus; modelDownloadProgress: ModelDownloadProgress | null; onDownloadModel: () => void; onCancelModelDownload: () => void; onRemoveModel: () => void; onGeneratePlan: (file: LocalPdf) => void; onOpenLesson: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void}) {
+function MaterialsTab({ownerId, preferences, materials, sessions, analysisProgresses, setAnalysisProgresses, setMaterials, setSessions, generatingPlanFor, planProgress, aiModelStatus, modelDownloadProgress, onDownloadModel, onCancelModelDownload, onRemoveModel, onGeneratePlan, onOpenLesson}: {ownerId: string; preferences: UserProfile['preferences']; materials: Material[]; sessions: StudySessionRecord[]; analysisProgresses: Record<string, LocalAIAnalysisProgress>; setAnalysisProgresses: React.Dispatch<React.SetStateAction<Record<string, LocalAIAnalysisProgress>>>; setMaterials: React.Dispatch<React.SetStateAction<Material[]>>; setSessions: React.Dispatch<React.SetStateAction<StudySessionRecord[]>>; generatingPlanFor: string | null; planProgress: string; aiModelStatus: AIModelStatus; modelDownloadProgress: ModelDownloadProgress | null; onDownloadModel: () => void; onCancelModelDownload: () => void; onRemoveModel: () => void; onGeneratePlan: (file: LocalPdf) => void; onOpenLesson: (materialId?: string, topicIndex?: number, learningFormat?: LearningFormat) => void}) {
   const [uploading, setUploading] = useState(false);
 
   const importPdf = async () => {
@@ -311,6 +346,10 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
   };
 
   const removeMaterial = (material: Material) => {
+    if (generatingPlanFor === material.id) {
+      Alert.alert('Análisis en curso', 'Espera a que termine o sal de la pantalla de análisis antes de borrar este PDF.');
+      return;
+    }
     Alert.alert('Eliminar PDF', `¿Quieres borrar “${material.name}”, sus temas y sus sesiones de este dispositivo?`, [
         {text: 'Cancelar', style: 'cancel'},
         {text: 'Eliminar', style: 'destructive', onPress: () => {
@@ -322,6 +361,8 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
               removeSessionFromDeviceCalendar(ownerId, session.id),
             ]));
             await deleteLocalPdf(ownerId, material.id);
+            await removeLocalAIAnalysisProgress(ownerId, material.id).catch(() => undefined);
+            setAnalysisProgresses(previous => { const next = {...previous}; delete next[material.id]; return next; });
             setSessions(nextSessions);
             setMaterials(previous => previous.filter(item => item.id !== material.id));
           })()
@@ -370,7 +411,10 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
         </Pressable> : null}
       </SurfaceCard>
       <View style={styles.materialList}>
-        {materials.map((material, index) => (
+        {materials.map((material, index) => {
+          const checkpoint = analysisProgresses[material.id];
+          const isGenerating = generatingPlanFor === material.localFile.id;
+          return (
           <View key={material.id} style={styles.materialCard}>
             <View style={styles.materialCardMain}>
               <Pressable style={styles.materialOpen} onPress={() => {
@@ -383,11 +427,12 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
             </View>
             <Pressable
               style={styles.createPlanButton}
-              disabled={generatingPlanFor === material.localFile.id}
+              disabled={isGenerating}
               onPress={() => onGeneratePlan(material.localFile)}
               accessibilityRole="button"
-              accessibilityLabel={`${generatingPlanFor === material.localFile.id ? planProgress || 'Analizando documento' : material.topics ? 'Mejorar plan de estudio' : 'Crear plan de estudio'} · ${material.name}`}
-            >{generatingPlanFor === material.localFile.id ? <ActivityIndicator size="small" color={colors.primary} /> : <Ionicons name="sparkles-outline" size={15} color={colors.primary} />}<Text style={styles.createPlanButtonText}>{generatingPlanFor === material.localFile.id ? planProgress || 'Analizando documento…' : material.topics ? `${material.topics} temas · Mejorar plan` : 'Crear plan de estudio'}</Text></Pressable>
+              accessibilityLabel={`${isGenerating ? planProgress || 'Analizando documento' : checkpoint ? `Reanudar análisis, ${checkpoint.completedChunks} de ${checkpoint.totalChunks} bloques` : material.topics ? 'Mejorar plan de estudio' : 'Crear plan de estudio'} · ${material.name}`}
+            >{isGenerating ? <ActivityIndicator size="small" color={colors.primary} /> : <Ionicons name={checkpoint ? 'play-forward-outline' : 'sparkles-outline'} size={15} color={colors.primary} />}<Text style={styles.createPlanButtonText}>{isGenerating ? planProgress || 'Analizando documento…' : checkpoint ? `Reanudar · ${checkpoint.completedChunks}/${checkpoint.totalChunks} bloques` : material.topics ? `${material.topics} temas · Mejorar plan` : 'Crear plan de estudio'}</Text></Pressable>
+            {checkpoint ? <View style={styles.savedAnalysisProgress}><Ionicons name="bookmark-outline" size={14} color={colors.teal} /><Text style={styles.savedAnalysisProgressText}>{isGenerating ? `Avance guardado aquí: ${checkpoint.completedChunks} de ${checkpoint.totalChunks} bloques listos.` : `Guardamos ${checkpoint.completedChunks} de ${checkpoint.totalChunks} bloques en este dispositivo. Puedes cerrar Brújula y retomar desde aquí.`}</Text></View> : null}
             {material.localFile.analysis ? <View style={styles.analysisPreview}>
               <Text style={styles.analysisProviderLabel}>
                 {material.localFile.analysis.analysisProvider === 'local-llm'
@@ -408,7 +453,8 @@ function MaterialsTab({ownerId, preferences, materials, sessions, setMaterials, 
               </Pressable>)}
             </View> : null}
           </View>
-        ))}
+          );
+        })}
       </View>
       <View style={styles.infoBox}><Ionicons name="phone-portrait-outline" size={18} color={colors.primary} /><Text style={styles.infoBoxText}>Tus PDFs, temas y sesiones nunca se envían a una nube. Brújula los lee y los organiza dentro de este dispositivo.</Text></View>
       <VoiceNotesPanel ownerId={ownerId} />
@@ -1013,6 +1059,8 @@ const styles = StyleSheet.create({
   infoBoxText: {flex: 1, fontSize: 12, lineHeight: 18, color: colors.muted},
   createPlanButton: {alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 9, paddingVertical: 6, paddingHorizontal: 9, borderRadius: radius.pill, backgroundColor: '#EEEFFE'},
   createPlanButtonText: {fontSize: 11, color: colors.primary, fontWeight: '700'},
+  savedAnalysisProgress: {flexDirection: 'row', alignItems: 'flex-start', gap: 7, paddingHorizontal: 9, marginTop: 3},
+  savedAnalysisProgressText: {flex: 1, fontSize: 11, lineHeight: 16, color: colors.teal},
   calendarCard: {paddingHorizontal: 8, paddingVertical: 13, marginBottom: 18},
   weekNavigation: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 10, marginBottom: 12},
   weekRange: {fontSize: 13, color: colors.text, fontWeight: '700'},
