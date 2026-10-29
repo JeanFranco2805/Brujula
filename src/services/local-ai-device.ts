@@ -88,11 +88,12 @@ export async function generateLocalAIAnalysis(
         n_batch: 512,
         use_mmap: true,
         use_mlock: false,
-        n_gpu_layers: 0,
+        n_gpu_layers: 99,
       }, percent => {
         const normalizedPercent = Math.floor(percent * 100);
         reportLoadProgress(Math.max(0, Math.min(99, normalizedPercent)));
       });
+      onProgress?.({stage: 'device-ready', accelerated: context.gpu});
       return context;
     },
   });
