@@ -50,7 +50,7 @@
       [
         "llama.rn",
         {
-          "enableOpenCLAndHexagon": false
+          "enableOpenCLAndHexagon": true
         }
       ],
       "expo-font",
