@@ -24,8 +24,6 @@ function makeContext(responseText = responseFor(source)) {
 
 function responseFor(evidence: string) {
   return JSON.stringify({
-    summary: 'La célula forma a los seres vivos y transmite información genética.',
-    keyPoints: ['La célula tiene funciones estructurales y funcionales.', 'Conserva material genético.'],
     topics: [{
       kind: 'concept',
       title: 'La célula',
@@ -40,7 +38,6 @@ function responseFor(evidence: string) {
           answer: 'Estructural y funcional',
           sourceAnswer: 'unidad estructural y funcional',
           feedback: 'El texto la describe con ambas funciones.',
-          evidence: 'La célula es la unidad estructural y funcional de los seres vivos.',
         },
         {
           kind: 'cloze',
@@ -49,7 +46,6 @@ function responseFor(evidence: string) {
           answer: 'célula',
           sourceAnswer: 'célula',
           feedback: 'La oración define a la célula como unidad de los seres vivos.',
-          evidence: 'La célula es la unidad estructural y funcional de los seres vivos.',
         },
         {
           kind: 'recall',
@@ -58,11 +54,8 @@ function responseFor(evidence: string) {
           answer: 'Es la unidad estructural y funcional de los seres vivos.',
           sourceAnswer: 'unidad estructural y funcional',
           feedback: 'Recuerda sus dos funciones y que contiene material genético.',
-          evidence: 'La célula es la unidad estructural y funcional de los seres vivos.',
         },
       ],
-      visualOutline: ['Estructura de los seres vivos', 'Material genético transmite información.'],
-      listenScript: 'La célula forma parte de los seres vivos y contiene la información que transmiten.',
     }],
   });
 }
@@ -98,25 +91,26 @@ describe('on-device AI study planner', () => {
     expect(userPrompt).toContain('resolver ejercicios interactivos');
     expect(userPrompt).toContain(source);
     expect(params.response_format?.type).toBe('json_schema');
-    expect(params.n_predict).toBe(900);
+    expect(params.n_predict).toBe(512);
     expect((params.response_format?.json_schema?.schema as {properties: {topics: {maxItems: number}}}).properties.topics.maxItems).toBe(1);
     expect(params.enable_thinking).toBe(false);
     expect(analysis.analysisProvider).toBe('local-llm');
     expect(analysis.modelName).toBe('Qwen3 1.7B · Q4_K_M');
-    expect(analysis.plannerVersion).toBe(2);
+    expect(analysis.plannerVersion).toBe(3);
     expect(analysis.targetLanguage).toBe('es-CO');
     expect(analysis.summary.length).toBeLessThanOrEqual(320);
     expect(analysis.topics[0].keyIdeas).toHaveLength(2);
-    expect(analysis.topics[0].explanation.length).toBeLessThanOrEqual(500);
+    expect(analysis.topics[0].explanation.length).toBeLessThanOrEqual(360);
     expect(analysis.topics[0].activities?.map(activity => activity.kind)).toEqual(['choice', 'cloze', 'recall']);
     expect(analysis.topics[0].activities?.every(activity => source.includes(activity.evidence))).toBe(true);
     expect(analysis.topics[0].activities?.[1].prompt).toContain('____');
-    expect(analysis.topics[0].visualOutline).toEqual(['Estructura de los seres vivos', 'Material genético transmite información.']);
+    expect(analysis.topics[0].visualOutline).toEqual(analysis.topics[0].keyIdeas);
     expect(analysis.topics[0].listenScript).toContain('La célula');
     expect(context.release).toHaveBeenCalledTimes(1);
     expect(onProgress).toHaveBeenCalledWith({stage: 'analyzing', completedChunks: 1, totalChunks: 1});
     expect(onProgress).toHaveBeenCalledWith({stage: 'analyzing', completedChunks: 0, totalChunks: 1});
-    expect(onProgress).toHaveBeenCalledWith({stage: 'generating', completedChunks: 0, totalChunks: 1, elapsedSeconds: expect.any(Number)});
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({stage: 'generating', completedChunks: 0, totalChunks: 1, elapsedSeconds: expect.any(Number), generatedTokens: expect.any(Number), tokensPerSecond: expect.any(Number)}));
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({stage: 'generating', generatedTokens: 1}));
     const progressCalls = onProgress.mock.calls as [LocalAIProgress][];
     expect(progressCalls.every(([event]) => event.stage !== 'loading-model' || event.percent < 100)).toBe(true);
     const firstAnalysisProgressIndex = progressCalls.findIndex(([event]) => event.stage === 'analyzing' && event.completedChunks === 0);
@@ -203,7 +197,7 @@ describe('on-device AI study planner', () => {
     try {
       await jest.advanceTimersByTimeAsync(0);
       await jest.advanceTimersByTimeAsync(5_000);
-      expect(onProgress).toHaveBeenCalledWith({stage: 'generating', completedChunks: 0, totalChunks: 1, elapsedSeconds: 5});
+      expect(onProgress).toHaveBeenCalledWith({stage: 'generating', completedChunks: 0, totalChunks: 1, elapsedSeconds: 5, generatedTokens: 0, tokensPerSecond: 0});
       await jest.advanceTimersByTimeAsync(LOCAL_AI_COMPLETION_IDLE_TIMEOUT_MS);
       await rejectedAnalysis;
     } finally {
@@ -264,6 +258,6 @@ describe('on-device AI study planner', () => {
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.at(-1)?.text).toContain('FINAL_DEL_PDF');
     expect(chunks.flatMap(chunk => chunk.text.split(/\s+/u))).toEqual(text.split(/\s+/u));
-    expect(chunks.every(chunk => chunk.text.length <= 3_600)).toBe(true);
+    expect(chunks.every(chunk => chunk.text.length <= 2_400)).toBe(true);
   });
 });
