@@ -153,7 +153,10 @@ export function MainApp({
           const minutes = String(Math.floor(progress.elapsedSeconds / 60)).padStart(2, '0');
           const seconds = String(progress.elapsedSeconds % 60).padStart(2, '0');
           const mode = accelerated ? ' · aceleración activa' : ' · modo CPU';
-          setPlanProgress(`Bloque ${progress.completedChunks + 1}/${progress.totalChunks}${mode} · ${minutes}:${seconds}`);
+          const work = progress.generatedTokens === 0
+            ? ' · leyendo texto'
+            : ` · ${progress.generatedTokens} ${progress.generatedTokens === 1 ? 'token' : 'tokens'} · ${progress.tokensPerSecond} token/s`;
+          setPlanProgress(`Bloque ${progress.completedChunks + 1}/${progress.totalChunks}${mode} · ${minutes}:${seconds}${work}`);
         }
         else if (progress.completedChunks === 0) setPlanProgress('Analizando el primer bloque. Puede tardar unos minutos…');
         else if (progress.completedChunks >= progress.totalChunks) setPlanProgress('Organizando temas y ejercicios…');
