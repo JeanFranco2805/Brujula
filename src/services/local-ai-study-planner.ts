@@ -3,8 +3,8 @@ import type {StudyPreferences} from '../types';
 import {getLearningLanguageName} from './learning-language';
 import {LocalPdfAnalysisError, type LearningActivity, type LocalPdfAnalysis, type StudyTopic} from './local-study-planner';
 
-const MAX_CHUNK_CHARACTERS = 3_600;
-const MAX_PREDICTED_TOKENS = 900;
+const MAX_CHUNK_CHARACTERS = 2_400;
+const MAX_PREDICTED_TOKENS = 512;
 export const LOCAL_AI_COMPLETION_IDLE_TIMEOUT_MS = 90_000;
 export const LOCAL_AI_COMPLETION_LIMIT_MS = 8 * 60_000;
 const MAX_TOPICS = 24;
@@ -24,41 +24,36 @@ const goalNames = {
 const activitySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['kind', 'prompt', 'options', 'answer', 'sourceAnswer', 'feedback', 'evidence'],
+  required: ['kind', 'prompt', 'options', 'answer', 'sourceAnswer', 'feedback'],
   properties: {
     kind: {type: 'string', enum: ['choice', 'cloze', 'recall']},
-    prompt: {type: 'string', maxLength: 170},
-    options: {type: 'array', items: {type: 'string', maxLength: 90}, maxItems: 3},
-    answer: {type: 'string', maxLength: 160},
+    prompt: {type: 'string', maxLength: 120},
+    options: {type: 'array', items: {type: 'string', maxLength: 60}, maxItems: 3},
+    answer: {type: 'string', maxLength: 100},
     sourceAnswer: {type: 'string', maxLength: 100},
-    feedback: {type: 'string', maxLength: 220},
-    evidence: {type: 'string', maxLength: 280},
+    feedback: {type: 'string', maxLength: 140},
   },
 } as const;
 
 const responseSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'keyPoints', 'topics'],
+  required: ['topics'],
   properties: {
-    summary: {type: 'string', maxLength: 320},
-    keyPoints: {type: 'array', items: {type: 'string', maxLength: 130}, maxItems: 5},
     topics: {
       type: 'array',
       maxItems: 1,
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['kind', 'title', 'explanation', 'keyIdeas', 'sourceEvidence', 'activities', 'visualOutline', 'listenScript'],
+        required: ['kind', 'title', 'explanation', 'keyIdeas', 'sourceEvidence', 'activities'],
         properties: {
           kind: {type: 'string', enum: ['concept', 'assignment']},
           title: {type: 'string', maxLength: 72},
-          explanation: {type: 'string', maxLength: 500},
-          keyIdeas: {type: 'array', items: {type: 'string', maxLength: 120}, maxItems: 3},
-          sourceEvidence: {type: 'string', maxLength: 280},
+          explanation: {type: 'string', maxLength: 360},
+          keyIdeas: {type: 'array', items: {type: 'string', maxLength: 96}, maxItems: 3},
+          sourceEvidence: {type: 'string', maxLength: 180},
           activities: {type: 'array', items: activitySchema, maxItems: 3},
-          visualOutline: {type: 'array', items: {type: 'string', maxLength: 100}, maxItems: 3},
-          listenScript: {type: 'string', maxLength: 400},
         },
       },
     },
@@ -68,7 +63,7 @@ const responseSchema = {
 export type LocalAIProgress =
   | {stage: 'loading-model'; percent: number}
   | {stage: 'device-ready'; accelerated: boolean}
-  | {stage: 'generating'; completedChunks: number; totalChunks: number; elapsedSeconds: number}
+  | {stage: 'generating'; completedChunks: number; totalChunks: number; elapsedSeconds: number; generatedTokens: number; tokensPerSecond: number}
   | {stage: 'analyzing'; completedChunks: number; totalChunks: number};
 
 export type LocalAIContext = Pick<LlamaContext, 'completion' | 'release' | 'stopCompletion'>;
@@ -113,12 +108,17 @@ export async function analyzeWithLocalAI(
         const chunk = chunks[index];
         const generationStartedAt = Date.now();
         let generatedTokens = 0;
-        const reportGenerationProgress = () => options.onProgress?.({
-          stage: 'generating',
-          completedChunks: index,
-          totalChunks: chunks.length,
-          elapsedSeconds: Math.floor((Date.now() - generationStartedAt) / 1000),
-        });
+        const reportGenerationProgress = () => {
+          const elapsedSeconds = Math.floor((Date.now() - generationStartedAt) / 1000);
+          options.onProgress?.({
+            stage: 'generating',
+            completedChunks: index,
+            totalChunks: chunks.length,
+            elapsedSeconds,
+            generatedTokens,
+            tokensPerSecond: Number((generatedTokens / Math.max(elapsedSeconds, 1)).toFixed(1)),
+          });
+        };
         reportGenerationProgress();
         const progressTimer = setInterval(reportGenerationProgress, 5_000);
         let text: string;
@@ -160,7 +160,7 @@ export async function analyzeWithLocalAI(
     summary: summaries.join(' ').slice(0, 320).trim(),
     keyPoints,
     topics,
-    plannerVersion: 2,
+    plannerVersion: 3,
     targetLanguage: options.languageTag,
     extractedCharacters: cleanText.length,
     extractedWords: meaningfulWords.length,
@@ -303,11 +303,12 @@ function createCompletionParams(chunk: PdfChunk, preferences: StudyPreferences, 
           `Escribe TODO el contenido dirigido al estudiante en ${languageName}. Conserva el término técnico original entre paréntesis solo cuando ayude a estudiar. sourceEvidence y sourceAnswer son citas del PDF y deben permanecer exactamente en el idioma original.`,
           'Separa información útil de encabezados, nombres de grupo, números de equipo, portadas e instrucciones administrativas. Nunca conviertas etiquetas como GROUP: 19 en temas o preguntas.',
           'Si el fragmento es una consigna de clase, clasifica el tema como assignment y resume sus entregables, restricciones y pasos verificables. Si enseña una materia, clasifica como concept y explica los conceptos del texto.',
-          'Devuelve solo el tema principal del fragmento. El título debe nombrar la idea o tarea, no copiar un encabezado genérico. El resumen general debe tener una oración. Cada explicación debe tener como máximo dos oraciones cortas.',
+          'Devuelve solo el tema principal del fragmento. El título debe nombrar la idea o tarea, no copiar un encabezado genérico. La explicación debe tener como máximo dos oraciones cortas.',
           'Devuelve de dos a tres keyIdeas atómicas por tema, una idea por línea y máximo 16 palabras por idea. No repitas el título, una explicación completa ni una pregunta en keyIdeas. No repitas la misma idea en varios temas.',
           'En cada tema crea exactamente tres actividades, en este orden: choice, cloze y recall. La pregunta debe referirse a un dato, concepto o requisito que aparezca en el PDF, nunca al nombre del grupo ni a un número aislado.',
           'choice y cloze: entrega tres opciones breves, una sola respuesta correcta y answer debe ser idéntica a esa opción. cloze debe incluir ____ en prompt. recall debe pedir una respuesta breve con palabras propias y options debe ser [].',
-          'En cada actividad, sourceAnswer es una frase corta copiada literalmente del PDF y evidence es una cita literal breve que contiene sourceAnswer. No traduzcas esas dos propiedades. Las otras propiedades sí deben ir en el idioma del teléfono.',
+          'sourceEvidence es una cita literal breve del PDF. En cada actividad, sourceAnswer es una frase literal incluida en sourceEvidence. No traduzcas esas citas. Las otras propiedades sí deben ir en el idioma del teléfono.',
+          'Mantén explicación, ideas, preguntas, opciones, feedback y citas lo más breves posible. No generes guion de audio ni esquema: la app los construye con las ideas clave.',
           'feedback explica la respuesta correcta en una oración y no añade datos que el texto no respalde. No uses párrafos largos ni repitas el documento.',
           'Responde solo con el JSON que coincide con el esquema. Sin Markdown, prefacios ni texto extra.',
         ].join('\n'),
@@ -344,13 +345,13 @@ function parseChunkAnalysis(raw: string, source: string): LocalAIChunkAnalysis {
   } catch {
     throw new LocalPdfAnalysisError('El análisis quedó incompleto. Vuelve a intentarlo.');
   }
-  if (!isRecord(parsed) || typeof parsed.summary !== 'string' || !Array.isArray(parsed.topics) || !Array.isArray(parsed.keyPoints)) {
+  if (!isRecord(parsed) || !Array.isArray(parsed.topics)) {
     throw new LocalPdfAnalysisError('La respuesta del análisis no tenía un formato válido. No guardamos el plan incompleto.');
   }
 
-  const summary = compactGeneratedText(parsed.summary, 320, 1);
-  const keyPoints = uniqueCompactTexts(parsed.keyPoints.filter((point): point is string => typeof point === 'string'), 130, 5);
   const topics = parsed.topics.map(value => parseTopic(value, source));
+  const summary = uniqueCompactTexts(topics.map(topic => topic.explanation), 180, 2).join(' ');
+  const keyPoints = uniqueCompactTexts(topics.flatMap(topic => topic.keyIdeas ?? []), 96, 3);
   return {summary, keyPoints, topics};
 }
 
@@ -358,24 +359,23 @@ function parseTopic(value: unknown, source: string): StudyTopic {
   if (!isRecord(value)) throw new LocalPdfAnalysisError('El análisis devolvió un tema con datos incompletos.');
   const kind = value.kind === 'assignment' ? 'assignment' : value.kind === 'concept' ? 'concept' : null;
   const title = compactGeneratedText(value.title, 72, 1);
-  const explanation = compactGeneratedText(value.explanation, 500, 2);
-  const sourceEvidence = cleanGeneratedText(value.sourceEvidence, 280);
-  const keyIdeas = uniqueCompactTexts(Array.isArray(value.keyIdeas) ? value.keyIdeas.filter((item): item is string => typeof item === 'string') : [], 120, 3);
+  const explanation = compactGeneratedText(value.explanation, 360, 2);
+  const sourceEvidence = cleanGeneratedText(value.sourceEvidence, 180);
+  const keyIdeas = uniqueCompactTexts(Array.isArray(value.keyIdeas) ? value.keyIdeas.filter((item): item is string => typeof item === 'string') : [], 96, 3);
   if (!kind || title.length < 3 || isGroupLabel(title) || explanation.length < 30 || keyIdeas.length < 2 || sourceEvidence.length < 20 || !isExactSourceText(sourceEvidence, source)) {
     throw new LocalPdfAnalysisError('No pudimos separar ideas breves y verificables de este fragmento. No guardamos ese plan incompleto.');
   }
 
   const activities = Array.isArray(value.activities)
-    ? value.activities.map(item => parseActivity(item, source)).filter((item): item is LearningActivity => item !== null)
+    ? value.activities.map(item => parseActivity(item, sourceEvidence)).filter((item): item is LearningActivity => item !== null)
     : [];
   const activityKinds = new Set(activities.map(activity => activity.kind));
   if (activities.length !== 3 || activityKinds.size !== 3) {
     throw new LocalPdfAnalysisError('La IA no pudo construir tres ejercicios distintos y comprobables a partir del texto. Vuelve a generarlo.');
   }
 
-  const visualOutline = uniqueCompactTexts(Array.isArray(value.visualOutline) ? value.visualOutline.filter((item): item is string => typeof item === 'string') : keyIdeas, 100, 3);
-  const listenScript = compactGeneratedText(value.listenScript, 400, 2);
-  if (!listenScript) throw new LocalPdfAnalysisError('No se pudo terminar el guion breve para escuchar. Vuelve a generar el plan.');
+  const visualOutline = keyIdeas;
+  const listenScript = compactGeneratedText(`${title}. ${explanation} ${keyIdeas.join('. ')}`, 400, 3);
   return {
     kind,
     title,
@@ -389,7 +389,7 @@ function parseTopic(value: unknown, source: string): StudyTopic {
   };
 }
 
-function parseActivity(value: unknown, source: string): LearningActivity | null {
+function parseActivity(value: unknown, sourceEvidence: string): LearningActivity | null {
   if (!isRecord(value) || (value.kind !== 'choice' && value.kind !== 'cloze' && value.kind !== 'recall')) return null;
   const kind = value.kind;
   const prompt = compactGeneratedText(value.prompt, 170, 1);
@@ -399,9 +399,9 @@ function parseActivity(value: unknown, source: string): LearningActivity | null 
   const answer = compactGeneratedText(value.answer, 160, 1);
   const sourceAnswer = cleanGeneratedText(value.sourceAnswer, 100);
   const feedback = compactGeneratedText(value.feedback, 220, 1);
-  const evidence = cleanGeneratedText(value.evidence, 280);
+  const evidence = sourceEvidence;
 
-  if (prompt.length < 14 || isGroupLabel(prompt) || isGroupLabel(answer) || answer.length < 2 || sourceAnswer.length < 3 || feedback.length < 8 || evidence.length < 20 || !isExactSourceText(evidence, source) || !isExactSourceText(sourceAnswer, evidence)) return null;
+  if (prompt.length < 14 || isGroupLabel(prompt) || isGroupLabel(answer) || answer.length < 2 || sourceAnswer.length < 3 || feedback.length < 8 || evidence.length < 20 || !isExactSourceText(sourceAnswer, evidence)) return null;
   if ((kind === 'choice' || kind === 'cloze') && (options.length !== 3 || !options.some(option => normalized(option) === normalized(answer)))) return null;
   if (kind === 'cloze' && !/_{3,}|\[\s*\]/u.test(prompt)) return null;
   if (kind === 'recall' && options.length !== 0) return null;
