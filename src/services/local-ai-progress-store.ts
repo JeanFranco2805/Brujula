@@ -5,7 +5,7 @@ import type {StudyPreferences} from '../types';
 
 const STORAGE_PREFIX = 'brujula.local-ai-progress.v1.';
 const RECORD_VERSION = 1;
-const ANALYSIS_PIPELINE_VERSION = 2;
+const ANALYSIS_PIPELINE_VERSION = 3;
 
 export type LocalAIAnalysisProgress = {
   version: number;
